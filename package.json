@@ -1,0 +1,48 @@
+{
+  "name": "cesium-clouds-atmosphere",
+  "version": "0.1.0",
+  "description": "Cesium 体积云 + Bruneton 大气 + 空中透视 + 镜头光晕渲染库（改编自 three-geospatial）",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./src/*": "./src/*",
+    "./public/*": "./public/*"
+  },
+  "files": [
+    "src",
+    "public",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "node --check src/index.js"
+  },
+  "dependencies": {
+    "dat.gui": "^0.7.9"
+  },
+  "peerDependencies": {
+    "three": ">=0.150.0"
+  },
+  "peerDependenciesMeta": {
+    "three": {
+      "optional": false
+    }
+  },
+  "keywords": [
+    "cesium",
+    "volumetric-clouds",
+    "atmosphere",
+    "bruneton",
+    "aerial-perspective",
+    "lens-flare",
+    "three-geospatial"
+  ],
+  "license": "MIT",
+  "author": "",
+  "homepage": "https://github.com/takram-design-engineering/three-geospatial",
+  "repository": {
+    "type": "git",
+    "url": ""
+  }
+}
