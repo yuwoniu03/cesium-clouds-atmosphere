@@ -15,19 +15,19 @@ import { AtmosphereParameters, PRECOMPUTE_CONSTANTS, getPrecomputeDefines, flatt
 import { AtmospherePostProcess } from "./AtmosphereFromThreeGeospatial/AtmospherePostProcess.js";
 import { AerialPerspectiveEffect } from "./AtmosphereFromThreeGeospatial/AerialPerspectiveEffect.js";
 import { loadBinThreeGeospatial, bindData3DTextureToCesiumContext } from "./loadBinThreeGeospatial.js";
+import { loadShaderSource } from "./shaderLoader.js";
+import {
+  DEFAULT_CLOUDS_ASSETS_BASE,
+  DEFAULT_BRUNETON_SHADER_BASE,
+  DEFAULT_BLUE_NOISE_URL,
+  DEFAULT_ATMOSPHERE_ASSETS_BASE,
+  DEFAULT_ATMOSPHERE_SHADER_BASE,
+} from "./assetPaths.js";
 
 const SHADOW_MAP_SIZE = 1024;
 const SHADOW_CASCADE_COUNT = 4;
 const SHADOW_RAY_FAR = 500000.0;
 const BSM_BLIT_SIZE = 1024;
-
-// 资源/shader 默认根路径（相对宿主页面 base）。
-// 这些路径均可通过构造 options 覆盖（见 constructor 的 assetsBase / atmosphereAssetsBase 等）。
-const DEFAULT_CLOUDS_ASSETS_BASE = "./public/clouds-assets/";
-const DEFAULT_BRUNETON_SHADER_BASE = "./src/AtmosphereFromThreeGeospatial/Shaders/bruneton/";
-const DEFAULT_BLUE_NOISE_URL = "./public/data/noisePic/noisergba256.png";
-const DEFAULT_ATMOSPHERE_ASSETS_BASE = "./src/AtmosphereFromThreeGeospatial/assets/";
-const DEFAULT_ATMOSPHERE_SHADER_BASE = "./src/AtmosphereFromThreeGeospatial/Shaders/";
 
 // ─── Cloud fragment shader (Bruneton integrated, no debug branches) ────────
 
@@ -901,12 +901,7 @@ export class ThreeGeospatialPipeline {
   // ── Shader loading for Bruneton prefix ─────────────────────────────────
 
   async _loadShader(name) {
-    const url = this.brunetonShaderBase + name;
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(`Shader ${name}: ${r.status} (${url})`);
-    const text = await r.text();
-    if (text.trimStart().startsWith("<!")) throw new Error(`Shader ${name} returned HTML, not GLSL: ${url}`);
-    return text;
+    return loadShaderSource(name, { shaderBaseUrl: this.brunetonShaderBase });
   }
 
   async _buildCloudFragmentShader() {

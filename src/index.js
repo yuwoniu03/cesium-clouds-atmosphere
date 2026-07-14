@@ -8,7 +8,20 @@
  * 典型用法见仓库根目录 README.md。
  */
 
+export { createCloudAtmosphere } from "./createCloudAtmosphere.js";
 export { ThreeGeospatialPipeline } from "./ThreeGeospatialPipeline.js";
+export {
+  resolveAssetPaths,
+  getDefaultAssetPaths,
+  PACKAGE_NAME,
+  PACKAGE_VERSION,
+  DEFAULT_CLOUDS_ASSETS_BASE,
+  DEFAULT_BRUNETON_SHADER_BASE,
+  DEFAULT_BLUE_NOISE_URL,
+  DEFAULT_ATMOSPHERE_ASSETS_BASE,
+  DEFAULT_ATMOSPHERE_SHADER_BASE,
+} from "./assetPaths.js";
+export { loadShaderSource, BUNDLED_SHADERS } from "./shaderLoader.js";
 export { LensFlareBloomStage } from "./AtmosphereFromThreeGeospatial/LensFlareBloomStage.js";
 export {
   AtmosphereParameters,

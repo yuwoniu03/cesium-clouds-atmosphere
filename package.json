@@ -16,13 +16,20 @@
     "LICENSE"
   ],
   "scripts": {
-    "check": "node --check src/index.js"
+    "demo": "vite",
+    "check": "node --check src/index.js",
+    "bundle-shaders": "node scripts/bundle-shaders.mjs",
+    "prepublishOnly": "npm run bundle-shaders"
   },
   "dependencies": {
     "dat.gui": "^0.7.9"
   },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  },
   "peerDependencies": {
-    "three": ">=0.150.0"
+    "three": ">=0.150.0",
+    "cesium": ">=1.132.0"
   },
   "peerDependenciesMeta": {
     "three": {
@@ -40,9 +47,9 @@
   ],
   "license": "MIT",
   "author": "",
-  "homepage": "https://github.com/takram-design-engineering/three-geospatial",
+  "homepage": "https://github.com/yuwoniu03/cesium-clouds-atmosphere#readme",
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/yuwoniu03/cesium-clouds-atmosphere.git"
   }
 }

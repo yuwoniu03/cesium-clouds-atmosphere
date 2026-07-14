@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>cesium-clouds-atmosphere · demo</title>
+
+    <!--
+      Cesium 版本 1.132，作者暂时只试过这个版本。
+    -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/cesium@1.132.0/Build/Cesium/Widgets/widgets.css"
+    />
+    <script>
+      window.CESIUM_BASE_URL = "https://unpkg.com/cesium@1.132.0/Build/Cesium/";
+    </script>
+    <script src="https://unpkg.com/cesium@1.132.0/Build/Cesium/Cesium.js"></script>
+    <!-- 备选 CDN：
+      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.132.0/Build/Cesium/Widgets/widgets.css" />
+      <script>window.CESIUM_BASE_URL = "https://cdn.jsdelivr.net/npm/cesium@1.132.0/Build/Cesium/";</script>
+      <script src="https://cdn.jsdelivr.net/npm/cesium@1.132.0/Build/Cesium/Cesium.js"></script>
+    -->
+
+    <style>
+      html,
+      body,
+      #cesiumContainer {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+      }
+      /* 隐藏 Cesium 版权图标/credit 面板（仅用于 demo 演示；
+         正式项目请遵守 Cesium 许可协议保留版权声明） */
+      .cesium-viewer-bottom,
+      .cesium-widget-credits {
+        display: none !important;
+      }
+      /* 加载提示，管线 init 完成后由 main.js 移除 */
+      #loadingTip {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #cfe3ff;
+        font-family: system-ui, sans-serif;
+        font-size: 15px;
+        background: rgba(0, 0, 0, 0.35);
+        pointer-events: none;
+        z-index: 10;
+      }
+      #loadingTip.hidden {
+        opacity: 0;
+        transition: opacity 0.4s ease;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="cesiumContainer"></div>
+
+    <!-- 由 Vite 处理：解析库源码里的 bare import（three / dat.gui） -->
+    <script type="module" src="/demo/main.js"></script>
+  </body>
+</html>

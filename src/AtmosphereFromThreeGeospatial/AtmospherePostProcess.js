@@ -5,6 +5,7 @@
 
 import { AtmosphereParameters,PRECOMPUTE_CONSTANTS,getPrecomputeDefines } from './AtmosphereParameters.js';
 import { loadPrecomputedTextures } from './PrecomputedTexturesLoader.js';
+import { loadShaderSource } from '../shaderLoader.js';
 import * as dat from "dat.gui";
 /** 本地 .bin 资源目录默认值（相对宿主页面 base）；可通过构造 options.assetsBaseUrl 覆盖 */
 const LOCAL_ASSETS_BASE = './src/AtmosphereFromThreeGeospatial/assets/';
@@ -28,14 +29,6 @@ function flattenAtmosphereUniform(atmosphereUniform) {
     }
   }
   return out;
-}
-
-function loadShader(baseUrl, name) {
-  const url = baseUrl.replace(/\/?$/, '/') + name;
-  return fetch(url).then((r) => {
-    if (!r.ok) throw new Error(`Failed to load ${name}: ${r.status}`);
-    return r.text();
-  });
 }
 
 function buildSkyFragmentSource(definitionsSource, commonSource, runtimeSource, skySource) {
@@ -574,11 +567,11 @@ export class AtmospherePostProcess {
 
     this._ready = (async () => {
       const [definitions, common, runtime] = await Promise.all([
-        loadShader(this.shaderBaseUrl, 'bruneton/definitions.glsl'),
-        loadShader(this.shaderBaseUrl, 'bruneton/common.glsl'),
-        loadShader(this.shaderBaseUrl, 'bruneton/runtime.glsl'),
+        loadShaderSource('bruneton/definitions.glsl', { shaderBaseUrl: this.shaderBaseUrl }),
+        loadShaderSource('bruneton/common.glsl', { shaderBaseUrl: this.shaderBaseUrl }),
+        loadShaderSource('bruneton/runtime.glsl', { shaderBaseUrl: this.shaderBaseUrl }),
       ]);
-      const sky = await loadShader(this.shaderBaseUrl, 'sky.glsl');
+      const sky = await loadShaderSource('sky.glsl', { shaderBaseUrl: this.shaderBaseUrl });
 
       this.textures = await loadPrecomputedTextures(
         this.assetsBaseUrl,

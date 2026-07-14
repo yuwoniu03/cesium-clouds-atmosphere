@@ -19,15 +19,9 @@ import {
   flattenAtmosphereUniform,
 } from "./AtmosphereParameters.js";
 import { loadPrecomputedTextures } from "./PrecomputedTexturesLoader.js";
+import { loadShaderSource } from "../shaderLoader.js";
 
 const LOCAL_ASSETS_BASE = "./src/AtmosphereFromThreeGeospatial/assets/";
-
-function fetchText(url) {
-  return fetch(url).then((r) => {
-    if (!r.ok) throw new Error(`Failed to load shader ${url}: ${r.status}`);
-    return r.text();
-  });
-}
 
 export class AerialPerspectiveEffect {
   /**
@@ -190,12 +184,12 @@ export class AerialPerspectiveEffect {
       this._cloudShadowDummyArray = null;
 
       // 3. 加载 Bruneton runtime + Cesium 版 aerialPerspectiveEffect.frag（无 #include）
-      const base = this.shaderBaseUrl.replace(/\/?$/, "/");
+      const shaderOpts = { shaderBaseUrl: this.shaderBaseUrl };
       const [definitions, common, runtime, aerialFrag] = await Promise.all([
-        fetchText(base + "bruneton/definitions.glsl"),
-        fetchText(base + "bruneton/common.glsl"),
-        fetchText(base + "bruneton/runtime.glsl"),
-        fetchText(base + "aerialPerspectiveEffect.frag"),
+        loadShaderSource("bruneton/definitions.glsl", shaderOpts),
+        loadShaderSource("bruneton/common.glsl", shaderOpts),
+        loadShaderSource("bruneton/runtime.glsl", shaderOpts),
+        loadShaderSource("aerialPerspectiveEffect.frag", shaderOpts),
       ]);
 
       const c = PRECOMPUTE_CONSTANTS;
