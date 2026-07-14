@@ -162,6 +162,9 @@ const pipeline = new ThreeGeospatialPipeline(viewer, {
 > 能解析到这些路径（典型做法：把本库 `src/` 与 `public/` 作为静态资源发布，
 > 或在 Vite/Webpack 中配置 `publicDir` / `copy` 插件把它们复制到产物根目录）。
 
+
+## 演示视频
+https://www.bilibili.com/video/BV184NQ65Ei7/?vd_source=773b21781ece9bf7d32824e31d11a418
 ## License
 
 MIT — 详见 [LICENSE](./LICENSE)。
