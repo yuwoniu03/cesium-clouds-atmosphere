@@ -85,6 +85,7 @@ cesium-clouds-atmosphere/
 BSM 数据通过 `setCloudShadow` 同步到大气与 Aerial 两侧，实现丁达尔与地面云影。
 
 ## 快速开始
+### 开始之前请申请好自己的Cesium ion Token 然后放到main.js的 这里Cesium.Ion.defaultAccessToken ="你的token"
 
 ### 运行 demo（clone 即跑）
 
