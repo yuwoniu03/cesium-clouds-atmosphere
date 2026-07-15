@@ -81,6 +81,20 @@ vec2 getCloudShadowAtlasOffset(int ci) {
   return vec2(x, y);
 }
 
+// 读取某 cascade 在该点的阴影系数(0=全暗,1=无阴影)。
+float shadeFromCascade(int ci, vec2 uv, float distToTop, float scale) {
+  vec2 atlasUv = getCloudShadowAtlasOffset(ci) + uv * 0.5;
+  vec4 shadow = (texture(u_cloudShadowBuffer, atlasUv) / scale) * u_cloudShadowDecode;
+  float od = min(shadow.b, shadow.g * max(0.0, distToTop - shadow.r));
+  od *= max(u_bsmGroundOpticalDepthScale, 0.0);
+  return exp(-od);
+}
+// 单层外缘淡出权重：uv 在 [0.15,0.85] 内为 1，趋近 [0.01]/[0.99] 降为 0。
+float edgeFade01(vec2 uv) {
+  return smoothstep(0.01, 0.15, uv.x) * (1.0 - smoothstep(0.85, 0.99, uv.x)) *
+         smoothstep(0.01, 0.15, uv.y) * (1.0 - smoothstep(0.85, 0.99, uv.y));
+}
+
 // rawWorldPosMeters：ECEF 米；u_cloudShadowBottomRadius / TopHeight 与管线 setCloudShadow 一致（米）
 float getGroundSunTransmittance(vec3 rawWorldPosMeters) {
   if (u_cloudShadowEnabled == 0) return 1.0;
@@ -118,18 +132,36 @@ float getGroundSunTransmittance(vec3 rawWorldPosMeters) {
   if (fade <= 0.0) return 1.0;
 
   float scale = max(u_cloudShadowScale, 1e-6);
+  // cascade 边界做「层间交叉淡出」：当前层 uv 接近外缘时混入下一层(阴影↔阴影)，
+  // 只有最外层(无下一层)才淡出到无阴影。这样不会在每层边缘产生亮环(同心方块)。
   for (int ci = 0; ci < 4; ci++) {
     vec4 clip = u_cloudShadowMatrices[ci] * vec4(rawWorldPosMeters, 1.0);
     clip /= clip.w;
     vec2 uv = clip.xy * 0.5 + 0.5;
     if (uv.x < 0.01 || uv.x > 0.99 || uv.y < 0.01 || uv.y > 0.99) continue;
-    vec2 atlasUv = getCloudShadowAtlasOffset(ci) + uv * 0.5;
-    vec4 shadow = (texture(u_cloudShadowBuffer, atlasUv) / scale) * u_cloudShadowDecode;
-    // 与 three-geospatial readShadowOpticalDepth 对齐：用 distanceToTop 钳制 opticalDepth，
-    // 使阴影强度随阴影射线长度衰减(远处云阴影更淡)，而不是恒取 maxOpticalDepth(shadow.b)。
-    float opticalDepth = min(shadow.b, shadow.g * max(0.0, distToShadowTop - shadow.r));
-    opticalDepth *= max(u_bsmGroundOpticalDepthScale, 0.0);
-    float shade = exp(-opticalDepth);
+    float shadeCur = shadeFromCascade(ci, uv, distToShadowTop, scale);
+    float alpha = edgeFade01(uv); // 当前层权重(中心1→边缘0)
+    if (alpha >= 0.999) {
+      return mix(1.0, shadeCur, fade);
+    }
+    // 当前层 uv 接近边缘：尝试用下一层补足缺失的阴影，做层间交叉淡出。
+    float shade = shadeCur * alpha;
+    float wSum = alpha;
+    if (ci + 1 < 4) {
+      vec4 clipN = u_cloudShadowMatrices[ci + 1] * vec4(rawWorldPosMeters, 1.0);
+      clipN /= clipN.w;
+      vec2 uvN = clipN.xy * 0.5 + 0.5;
+      if (uvN.x >= 0.01 && uvN.x <= 0.99 && uvN.y >= 0.01 && uvN.y <= 0.99) {
+        float shadeNext = shadeFromCascade(ci + 1, uvN, distToShadowTop, scale);
+        float alphaN = edgeFade01(uvN);
+        // 下一层中心权重高时多贡献，边缘时少贡献；保证总权重≤1，缺额即"无阴影"。
+        float wN = (1.0 - alpha) * alphaN;
+        shade += shadeNext * wN;
+        wSum += wN;
+      }
+    }
+    // wSum<1 的部分按"无阴影"(shade=1)补齐 → 最外层自然淡出到无阴影。
+    shade += 1.0 * (1.0 - wSum);
     return mix(1.0, shade, fade);
   }
   return 1.0;

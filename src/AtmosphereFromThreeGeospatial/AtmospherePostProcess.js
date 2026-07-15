@@ -138,6 +138,20 @@ float readBSMOpticalDepth(vec3 posMeters) {
   return 0.0;
 }
 
+// 读取某 cascade 在该点的阴影系数(0=全暗,1=无阴影)。
+float shadeFromCascade(int ci, vec2 uv, float distToTop, float scale) {
+  vec2 atlasUv = getCloudShadowAtlasOffset(ci) + uv * 0.5;
+  vec4 shadow = (texture(u_cloudShadowBuffer, atlasUv) / scale) * u_cloudShadowDecode;
+  float od = min(shadow.b, shadow.g * max(0.0, distToTop - shadow.r));
+  od *= max(u_bsmGroundOpticalDepthScale, 0.0);
+  return exp(-od);
+}
+// 单层外缘淡出权重：uv 在 [0.15,0.85] 内为 1，趋近 [0.01]/[0.99] 降为 0。
+float edgeFade01(vec2 uv) {
+  return smoothstep(0.01, 0.15, uv.x) * (1.0 - smoothstep(0.85, 0.99, uv.x)) *
+         smoothstep(0.01, 0.15, uv.y) * (1.0 - smoothstep(0.85, 0.99, uv.y));
+}
+
 float getGroundSunTransmittance(vec3 rawWorldPosMeters) {
   if (u_cloudShadowEnabled == 0) return 1.0;
   // 昼夜线遮挡 + 低太阳角阴影淡出(与 aerialPerspectiveEffect.frag 对齐)：避免日出/日落
@@ -166,17 +180,33 @@ float getGroundSunTransmittance(vec3 rawWorldPosMeters) {
   if (fade <= 0.0) return 1.0;
 
   float scale = max(u_cloudShadowScale, 1e-6);
+  // cascade 边界做层间交叉淡出(阴影↔阴影)，只有最外层淡出到无阴影，避免每层边缘亮环(同心方块)。
   for (int ci = 0; ci < 4; ci++) {
     vec4 clip = u_cloudShadowMatrices[ci] * vec4(rawWorldPosMeters, 1.0);
     clip /= clip.w;
     vec2 uv = clip.xy * 0.5 + 0.5;
     if (uv.x < 0.01 || uv.x > 0.99 || uv.y < 0.01 || uv.y > 0.99) continue;
-    vec2 atlasUv = getCloudShadowAtlasOffset(ci) + uv * 0.5;
-    vec4 shadow = (texture(u_cloudShadowBuffer, atlasUv) / scale) * u_cloudShadowDecode;
-    // 与 three-geospatial 对齐：用 distanceToTop 钳制 opticalDepth，远处云阴影更淡。
-    float opticalDepth = min(shadow.b, shadow.g * max(0.0, distToShadowTop - shadow.r));
-    opticalDepth *= max(u_bsmGroundOpticalDepthScale, 0.0);
-    return mix(1.0, exp(-opticalDepth), fade);
+    float shadeCur = shadeFromCascade(ci, uv, distToShadowTop, scale);
+    float alpha = edgeFade01(uv);
+    if (alpha >= 0.999) {
+      return mix(1.0, shadeCur, fade);
+    }
+    float shade = shadeCur * alpha;
+    float wSum = alpha;
+    if (ci + 1 < 4) {
+      vec4 clipN = u_cloudShadowMatrices[ci + 1] * vec4(rawWorldPosMeters, 1.0);
+      clipN /= clipN.w;
+      vec2 uvN = clipN.xy * 0.5 + 0.5;
+      if (uvN.x >= 0.01 && uvN.x <= 0.99 && uvN.y >= 0.01 && uvN.y <= 0.99) {
+        float shadeNext = shadeFromCascade(ci + 1, uvN, distToShadowTop, scale);
+        float alphaN = edgeFade01(uvN);
+        float wN = (1.0 - alpha) * alphaN;
+        shade += shadeNext * wN;
+        wSum += wN;
+      }
+    }
+    shade += 1.0 * (1.0 - wSum);
+    return mix(1.0, shade, fade);
   }
   return 1.0;
 }
