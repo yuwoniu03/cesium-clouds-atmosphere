@@ -25,6 +25,7 @@ export class CloudShadowPass {
         // 与 three-geospatial 一致：每 cascade 一层，分辨率为 tileSize
         this._tileSize = Math.floor(this.size / 2);
         // CSM cascades（对齐 three-geospatial CascadedShadowMaps）
+        this._shadowNear = 0.1;
         this._shadowFar = 0.0;
         this._shadowIntervals = Array.from({ length: SHADOW_CASCADE_COUNT }, () => new Float32Array([0, 0]));
         this._shadowMatrices = Array.from({ length: SHADOW_CASCADE_COUNT }, () => new Float32Array(16));
@@ -228,6 +229,7 @@ export class CloudShadowPass {
         if (!Number.isFinite(far) || far <= near + 1e-3) {
             far = near + 1.0;
         }
+        this._shadowNear = near;
         this._shadowFar = far;
 
         // splitFrustum(mode='practical', lambda=0.5) 复刻：
@@ -810,6 +812,14 @@ void main() {
 
     getShadowFar() {
         return this._shadowFar;
+    }
+
+    getShadowNear() {
+        return this._shadowNear;
+    }
+
+    getTileSize() {
+        return this._tileSize;
     }
 
     /**

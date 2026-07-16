@@ -7,7 +7,8 @@ export class ShadowResolvePass {
     constructor(viewer, options = {}) {
         this.viewer = viewer;
         this.size = options.size || 1024;
-        this.temporalAlpha = options.temporalAlpha ?? 0.1;
+        // 对齐 three-geospatial ShadowResolveMaterial 默认≈0.01；运动时 render() 内会抬高
+        this.temporalAlpha = options.temporalAlpha ?? 0.01;
         this.varianceGamma = options.varianceGamma ?? 1.0;
         this._gl = null;
         this._program = null;
@@ -18,6 +19,12 @@ export class ShadowResolvePass {
         this._preRenderListener = null;
         this.inputTexture = null;
         this.depthVelocityTexture = null;
+        // 相机运动检测：移动时提高 temporalAlpha(多用当前帧)，避免 BSM temporal 累积在
+        // 相机移动期产生拖影/抖动(reprojection 不准：cascade 切换 + ortho frustum 滑动 + 低分辨率)。
+        // 静止时回退到低 alpha 做时间域降噪。用户现象：移动抖、停止 1~2s 后稳。
+        this._prevCamPos = null;
+        this._prevCamDir = null;
+        this._motionAlpha = this.temporalAlpha;
     }
 
     setInputTextures(inputTexture, depthVelocityTexture) {
@@ -212,6 +219,27 @@ void main() {
         if (!gl || !this._fbo || !this._program || !this._outTex || !this._historyTex) return;
         if (!this.inputTexture || !this.depthVelocityTexture) return;
 
+        // 相机运动量 → temporalAlpha：移动越大 alpha 越高(趋近1=纯当前帧，无累积拖影)，
+        // 静止时回到 this.temporalAlpha 做时间域降噪。
+        const cam = this.viewer?.scene?.camera;
+        let motion = 0.0;
+        if (cam) {
+            const pos = cam.positionWC; const dir = cam.directionWC;
+            if (this._prevCamPos) {
+                const dp = Cesium.Cartesian3.distance(pos, this._prevCamPos);
+                const dd = Math.abs(Cesium.Cartesian3.dot(dir, this._prevCamDir) - 1.0);
+                // 位置每米 + 方向每弧度(1-cos) 综合归一化。云阴影掠射时 BSM 内特征滑动放大，
+                // 故对微小运动也敏感：1m/帧 或 0.1°/帧 即触发。
+                motion = Math.min(1.0, dp * 2e-3 + dd * 100.0);
+            }
+            this._prevCamPos = Cesium.Cartesian3.clone(pos, this._prevCamPos);
+            this._prevCamDir = Cesium.Cartesian3.clone(dir, this._prevCamDir);
+        }
+        const stillAlpha = this.temporalAlpha;
+        // smoothstep：motion 0→0.01 从 stillAlpha 升到 1.0。移动期几乎纯当前帧。
+        const t = Math.min(1.0, Math.max(0.0, motion / 0.01));
+        this._motionAlpha = stillAlpha + (1.0 - stillAlpha) * (t * t * (3.0 - 2.0 * t));
+
         const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING);
         const prevViewport = gl.getParameter(gl.VIEWPORT);
         const prevBlend = gl.isEnabled(gl.BLEND);
@@ -230,7 +258,7 @@ void main() {
         const vgLoc = gl.getUniformLocation(this._program, "u_varianceGamma");
         if (vgLoc) gl.uniform1f(vgLoc, this.varianceGamma);
         const taLoc = gl.getUniformLocation(this._program, "u_temporalAlpha");
-        if (taLoc) gl.uniform1f(taLoc, this.temporalAlpha);
+        if (taLoc) gl.uniform1f(taLoc, this._motionAlpha);
 
         let unit = 0;
         const bind = (name, texObj) => {

@@ -20,12 +20,19 @@ uniform vec4 u_cloudShadowDecode;
 uniform int u_cloudShadowEnabled;
 uniform mat4 u_cloudShadowMatrices[4];
 uniform vec2 u_cloudShadowIntervals[4];
+uniform float u_cloudShadowNear;
 uniform float u_cloudShadowFar;
 uniform float u_cloudShadowTopHeight;
 uniform float u_cloudShadowBottomRadius;
 uniform float u_bsmGroundOpticalDepthScale;
+// cascade UV 空间 texel 尺寸（单 cascade tile，非整个 atlas）
+uniform vec2 u_cloudShadowTexelSize;
+// 远距几何误差修正量 [0,1]：越大越把 BSM 采样点拉向椭球/bottom 球，抑制地形 LOD 抖动
+uniform float u_geometricErrorCorrectionAmount;
 
 const float METER_TO_LENGTH_UNIT = 0.001; // m -> km
+
+float saturateAP(float x) { return clamp(x, 0.0, 1.0); }
 
 vec3 ACESFilmic(vec3 x) {
   float a = 2.51;
@@ -81,49 +88,130 @@ vec2 getCloudShadowAtlasOffset(int ci) {
   return vec2(x, y);
 }
 
-// 读取某 cascade 在该点的阴影系数(0=全暗,1=无阴影)。
-float shadeFromCascade(int ci, vec2 uv, float distToTop, float scale) {
+// three.js / three-geospatial：与 CloudShadowPass intervals=(d-near)/(far-near) 一致
+float viewZToOrthographicDepth(float viewZ, float near, float far) {
+  return (viewZ + near) / (near - far);
+}
+
+// 对齐 three-geospatial cascadedShadowMaps.glsl：按相机 view depth 选 cascade，边界 dither 淡入淡出
+int getFadedCascadeIndex(mat4 viewMat, vec3 worldPos, vec2 intervals[4], float near, float far, float jitter) {
+  vec4 vp = viewMat * vec4(worldPos, 1.0);
+  float depth = viewZToOrthographicDepth(vp.z, near, far);
+  int nextIndex = -1;
+  int prevIndex = -1;
+  float alpha = 1.0;
+  for (int i = 0; i < 4; ++i) {
+    vec2 interval = intervals[i];
+    float intervalCenter = (interval.x + interval.y) * 0.5;
+    float closestEdge = depth < intervalCenter ? interval.x : interval.y;
+    float margin = closestEdge * closestEdge * 0.5;
+    interval += margin * vec2(-0.5, 0.5);
+    if (i < 3) {
+      if (depth >= interval.x && depth < interval.y) {
+        prevIndex = nextIndex;
+        nextIndex = i;
+        alpha = saturateAP(min(depth - interval.x, interval.y - depth) / max(margin, 1e-6));
+      }
+    } else {
+      if (depth >= interval.x) {
+        prevIndex = nextIndex;
+        nextIndex = i;
+        alpha = saturateAP((depth - interval.x) / max(margin, 1e-6));
+      }
+    }
+  }
+  return jitter <= alpha ? nextIndex : prevIndex;
+}
+
+vec2 getShadowUv(vec3 worldPos, int ci) {
+  vec4 clip = u_cloudShadowMatrices[ci] * vec4(worldPos, 1.0);
+  clip /= clip.w;
+  return clip.xy * 0.5 + 0.5;
+}
+
+float interleavedGradientNoise(vec2 coord) {
+  const vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
+  return fract(magic.z * fract(dot(coord, magic.xy)));
+}
+
+vec2 vogelDisk(int index, int count, float phi) {
+  const float goldenAngle = 2.39996322972865332;
+  float r = sqrt(float(index) + 0.5) / sqrt(float(count));
+  float theta = float(index) * goldenAngle + phi;
+  return r * vec2(cos(theta), sin(theta));
+}
+
+float readShadowOpticalDepth(vec2 uv, int ci, float distToTop) {
+  float scale = max(u_cloudShadowScale, 1e-6);
   vec2 atlasUv = getCloudShadowAtlasOffset(ci) + uv * 0.5;
   vec4 shadow = (texture(u_cloudShadowBuffer, atlasUv) / scale) * u_cloudShadowDecode;
   float od = min(shadow.b, shadow.g * max(0.0, distToTop - shadow.r));
-  od *= max(u_bsmGroundOpticalDepthScale, 0.0);
-  return exp(-od);
+  return od * max(u_bsmGroundOpticalDepthScale, 0.0);
 }
-// 单层外缘淡出权重：uv 在 [0.15,0.85] 内为 1，趋近 [0.01]/[0.99] 降为 0。
-float edgeFade01(vec2 uv) {
-  return smoothstep(0.01, 0.15, uv.x) * (1.0 - smoothstep(0.85, 0.99, uv.x)) *
-         smoothstep(0.01, 0.15, uv.y) * (1.0 - smoothstep(0.85, 0.99, uv.y));
+
+float sampleShadowOpticalDepthPCF(vec3 worldPos, float distToTop, float radius, int ci) {
+  vec2 uv = getShadowUv(worldPos, ci);
+  // 与 three-geospatial 一致：UV 出 [0,1] 才无阴影（硬切），不再做 edgeFade 矩形软边
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
+  vec2 texel = max(u_cloudShadowTexelSize, vec2(1e-4));
+  if (radius < 0.1) return readShadowOpticalDepth(uv, ci, distToTop);
+  float sum = 0.0;
+  float phi = interleavedGradientNoise(gl_FragCoord.xy) * 6.28318530718;
+  for (int i = 0; i < 16; ++i) {
+    sum += readShadowOpticalDepth(uv + vogelDisk(i, 16, phi) * radius * texel, ci, distToTop);
+  }
+  return sum / 16.0;
+}
+
+// three-geospatial correctGeometricError：远距把位置混向 bottom 球表面，减轻 tile/地形几何误差对阴影 UV 的影响
+vec3 correctBsmPosition(vec3 posMeters, float amount) {
+  if (amount <= 0.0) return posMeters;
+  vec3 sphereNormal = normalize(posMeters);
+  vec3 spherePosition = u_cloudShadowBottomRadius * sphereNormal;
+  return mix(posMeters, spherePosition, saturateAP(amount));
+}
+
+// 远距额外径向稳定：保留水平位置方向，高度向粗略地表混合，进一步抑制 DEM LOD 高度跳变
+vec3 stabilizeBsmSamplePosition(vec3 posMeters, float viewDistMeters) {
+  float geoAmt = max(u_geometricErrorCorrectionAmount, 0.0);
+  // 距离驱动：约 8km 起开始拉向稳定面，50km 附近接近满修正
+  float distAmt = smoothstep(8000.0, 50000.0, viewDistMeters);
+  float amount = saturateAP(max(geoAmt, distAmt));
+  vec3 corrected = correctBsmPosition(posMeters, amount);
+  if (amount < 0.01) return corrected;
+  // 径向高度：用当前高度与 bottom 的差做轻度保留，避免近处地形阴影完全贴球
+  vec3 n = normalize(corrected);
+  float h = length(posMeters) - u_cloudShadowBottomRadius;
+  float stableH = mix(h, max(h, 0.0) * (1.0 - 0.85 * amount), amount);
+  return n * (u_cloudShadowBottomRadius + stableH);
 }
 
 // rawWorldPosMeters：ECEF 米；u_cloudShadowBottomRadius / TopHeight 与管线 setCloudShadow 一致（米）
 float getGroundSunTransmittance(vec3 rawWorldPosMeters) {
   if (u_cloudShadowEnabled == 0) return 1.0;
-  vec3 groundNormal = normalize(rawWorldPosMeters);
+
+  // 采样前稳定 BSM 世界点（空中透视仍用原始 depth 点，见 main）
+  vec3 camMeters = (u_cameraPosition + u_altitudeCorrection) / METER_TO_LENGTH_UNIT;
+  float viewDist = length(rawWorldPosMeters - camMeters);
+  vec3 samplePos = stabilizeBsmSamplePosition(rawWorldPosMeters, viewDist);
+
+  vec3 groundNormal = normalize(samplePos);
   float sunSinElev = dot(u_sunDirection, groundNormal);
 
   // 1) 昼夜线遮挡：太阳低于该地面点本地地平线时，地面点已入夜，无云阴影。
-  //    这是「地球曲面遮挡直射阳光」的几何判据。
   float horizonFade = smoothstep(-0.02, 0.02, sunSinElev);
   if (horizonFade <= 0.0) return 1.0;
 
-  // 阴影射线：从地面点沿太阳方向(指向太阳)打向云顶壳。
-  // 注意：Cesium 椭球(≈6378137m)与地形点都位于 Bruneton bottom 球(≈6371860m)外侧，
-  // 阴影射线朝太阳(向外)，不会重新进入 bottom 球，故「地球曲面遮挡直射阳光」由上面的
-  // horizonFade(昼夜线)承担；低空长阴影的淡出由下面的 lowSunFade / rayLenFade 承担。
-  float R = u_cloudShadowBottomRadius;
-  float topShellR = R + u_cloudShadowTopHeight;
+  float topShellR = u_cloudShadowBottomRadius + u_cloudShadowTopHeight;
   vec3 rd = u_sunDirection;
-  float bS = dot(rd, rawWorldPosMeters);
-  float cTop = dot(rawWorldPosMeters, rawWorldPosMeters) - topShellR * topShellR;
+  float bS = dot(rd, samplePos);
+  float cTop = dot(samplePos, samplePos) - topShellR * topShellR;
   float discTop = bS * bS - cTop;
-  if (discTop <= 0.0) return 1.0; // 射线不与云顶壳相交：云在地球曲面以下不可见
+  if (discTop <= 0.0) return 1.0;
   float distToShadowTop = -bS + sqrt(discTop);
   if (distToShadowTop <= 0.0) return 1.0;
 
-  // 2) 低太阳角阴影衰减：太阳越低，云阴影在地面被拉得越长(掠射 distToShadowTop 巨大)。
-  //    按常理这种长阴影应被地球曲面/大气逐步吞没，而非以全强度无限延伸。这里按太阳高度角
-  //    与阴影射线长度双重衰减，使日出/日落的长阴影自然淡出，避免天际线处硬条带。
-  //    sunSinElev∈[0,0.087](约0°~5°)渐变；射线长度超过 cloudTopHeight*6 时开始衰减。
+  // 2) 低太阳角 / 长阴影淡出（Cesium 椭球外地形专用，three-geospatial 无）
   float lowSunFade = smoothstep(0.0, 0.087, sunSinElev);
   float rayLenFade = 1.0 - smoothstep(u_cloudShadowTopHeight * 6.0,
                                        u_cloudShadowTopHeight * 20.0,
@@ -131,40 +219,24 @@ float getGroundSunTransmittance(vec3 rawWorldPosMeters) {
   float fade = horizonFade * lowSunFade * rayLenFade;
   if (fade <= 0.0) return 1.0;
 
-  float scale = max(u_cloudShadowScale, 1e-6);
-  // cascade 边界做「层间交叉淡出」：当前层 uv 接近外缘时混入下一层(阴影↔阴影)，
-  // 只有最外层(无下一层)才淡出到无阴影。这样不会在每层边缘产生亮环(同心方块)。
-  for (int ci = 0; ci < 4; ci++) {
-    vec4 clip = u_cloudShadowMatrices[ci] * vec4(rawWorldPosMeters, 1.0);
-    clip /= clip.w;
-    vec2 uv = clip.xy * 0.5 + 0.5;
-    if (uv.x < 0.01 || uv.x > 0.99 || uv.y < 0.01 || uv.y > 0.99) continue;
-    float shadeCur = shadeFromCascade(ci, uv, distToShadowTop, scale);
-    float alpha = edgeFade01(uv); // 当前层权重(中心1→边缘0)
-    if (alpha >= 0.999) {
-      return mix(1.0, shadeCur, fade);
-    }
-    // 当前层 uv 接近边缘：尝试用下一层补足缺失的阴影，做层间交叉淡出。
-    float shade = shadeCur * alpha;
-    float wSum = alpha;
-    if (ci + 1 < 4) {
-      vec4 clipN = u_cloudShadowMatrices[ci + 1] * vec4(rawWorldPosMeters, 1.0);
-      clipN /= clipN.w;
-      vec2 uvN = clipN.xy * 0.5 + 0.5;
-      if (uvN.x >= 0.01 && uvN.x <= 0.99 && uvN.y >= 0.01 && uvN.y <= 0.99) {
-        float shadeNext = shadeFromCascade(ci + 1, uvN, distToShadowTop, scale);
-        float alphaN = edgeFade01(uvN);
-        // 下一层中心权重高时多贡献，边缘时少贡献；保证总权重≤1，缺额即"无阴影"。
-        float wN = (1.0 - alpha) * alphaN;
-        shade += shadeNext * wN;
-        wSum += wN;
-      }
-    }
-    // wSum<1 的部分按"无阴影"(shade=1)补齐 → 最外层自然淡出到无阴影。
-    shade += 1.0 * (1.0 - wSum);
-    return mix(1.0, shade, fade);
-  }
-  return 1.0;
+  float jitter = interleavedGradientNoise(gl_FragCoord.xy);
+  float near = max(u_cloudShadowNear, 1e-3);
+  float far = max(u_cloudShadowFar, near + 1.0);
+  int ci = getFadedCascadeIndex(
+    czm_view,
+    samplePos,
+    u_cloudShadowIntervals,
+    near,
+    far,
+    jitter
+  );
+  if (ci < 0) return 1.0;
+
+  // PCF 半径（cascade UV texel 单位）；远处略加大，减轻锯齿
+  float pcfRadius = mix(1.5, 3.0, saturateAP(viewDist / max(far, 1.0)));
+  float opticalDepth = sampleShadowOpticalDepthPCF(samplePos, distToShadowTop, pcfRadius, ci);
+  float shade = exp(-opticalDepth);
+  return mix(1.0, shade, fade);
 }
 
 void main() {

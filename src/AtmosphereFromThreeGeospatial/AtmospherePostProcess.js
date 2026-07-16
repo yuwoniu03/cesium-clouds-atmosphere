@@ -83,9 +83,12 @@ uniform vec4 u_cloudShadowDecode;
 uniform int u_cloudShadowEnabled;
 uniform mat4 u_cloudShadowMatrices[4];
 uniform vec2 u_cloudShadowIntervals[4];
+uniform float u_cloudShadowNear;
 uniform float u_cloudShadowFar;
 uniform float u_cloudShadowTopHeight;
 uniform float u_cloudShadowBottomRadius;
+uniform vec2 u_cloudShadowTexelSize;
+uniform float u_geometricErrorCorrectionAmount;
 // three-geospatial 对齐：直接消费 shadowLengthBuffer（长度单位与大气 length unit 一致，当前为 km）
 uniform sampler2D u_shadowLengthBuffer;
 uniform int u_shadowLengthEnabled;
@@ -138,38 +141,117 @@ float readBSMOpticalDepth(vec3 posMeters) {
   return 0.0;
 }
 
-// 读取某 cascade 在该点的阴影系数(0=全暗,1=无阴影)。
-float shadeFromCascade(int ci, vec2 uv, float distToTop, float scale) {
+float saturateAP(float x) { return clamp(x, 0.0, 1.0); }
+
+float viewZToOrthographicDepth(float viewZ, float near, float far) {
+  return (viewZ + near) / (near - far);
+}
+
+int getFadedCascadeIndex(mat4 viewMat, vec3 worldPos, vec2 intervals[4], float near, float far, float jitter) {
+  vec4 vp = viewMat * vec4(worldPos, 1.0);
+  float depth = viewZToOrthographicDepth(vp.z, near, far);
+  int nextIndex = -1;
+  int prevIndex = -1;
+  float alpha = 1.0;
+  for (int i = 0; i < 4; ++i) {
+    vec2 interval = intervals[i];
+    float intervalCenter = (interval.x + interval.y) * 0.5;
+    float closestEdge = depth < intervalCenter ? interval.x : interval.y;
+    float margin = closestEdge * closestEdge * 0.5;
+    interval += margin * vec2(-0.5, 0.5);
+    if (i < 3) {
+      if (depth >= interval.x && depth < interval.y) {
+        prevIndex = nextIndex;
+        nextIndex = i;
+        alpha = saturateAP(min(depth - interval.x, interval.y - depth) / max(margin, 1e-6));
+      }
+    } else {
+      if (depth >= interval.x) {
+        prevIndex = nextIndex;
+        nextIndex = i;
+        alpha = saturateAP((depth - interval.x) / max(margin, 1e-6));
+      }
+    }
+  }
+  return jitter <= alpha ? nextIndex : prevIndex;
+}
+
+vec2 getShadowUvGround(vec3 worldPos, int ci) {
+  vec4 clip = u_cloudShadowMatrices[ci] * vec4(worldPos, 1.0);
+  clip /= clip.w;
+  return clip.xy * 0.5 + 0.5;
+}
+
+float interleavedGradientNoiseAP(vec2 coord) {
+  const vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
+  return fract(magic.z * fract(dot(coord, magic.xy)));
+}
+
+vec2 vogelDiskAP(int index, int count, float phi) {
+  const float goldenAngle = 2.39996322972865332;
+  float r = sqrt(float(index) + 0.5) / sqrt(float(count));
+  float theta = float(index) * goldenAngle + phi;
+  return r * vec2(cos(theta), sin(theta));
+}
+
+float readShadowOpticalDepthGround(vec2 uv, int ci, float distToTop) {
+  float scale = max(u_cloudShadowScale, 1e-6);
   vec2 atlasUv = getCloudShadowAtlasOffset(ci) + uv * 0.5;
   vec4 shadow = (texture(u_cloudShadowBuffer, atlasUv) / scale) * u_cloudShadowDecode;
   float od = min(shadow.b, shadow.g * max(0.0, distToTop - shadow.r));
-  od *= max(u_bsmGroundOpticalDepthScale, 0.0);
-  return exp(-od);
+  return od * max(u_bsmGroundOpticalDepthScale, 0.0);
 }
-// 单层外缘淡出权重：uv 在 [0.15,0.85] 内为 1，趋近 [0.01]/[0.99] 降为 0。
-float edgeFade01(vec2 uv) {
-  return smoothstep(0.01, 0.15, uv.x) * (1.0 - smoothstep(0.85, 0.99, uv.x)) *
-         smoothstep(0.01, 0.15, uv.y) * (1.0 - smoothstep(0.85, 0.99, uv.y));
+
+float sampleShadowOpticalDepthPCFGround(vec3 worldPos, float distToTop, float radius, int ci) {
+  vec2 uv = getShadowUvGround(worldPos, ci);
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0.0;
+  vec2 texel = max(u_cloudShadowTexelSize, vec2(1e-4));
+  if (radius < 0.1) return readShadowOpticalDepthGround(uv, ci, distToTop);
+  float sum = 0.0;
+  float phi = interleavedGradientNoiseAP(gl_FragCoord.xy) * 6.28318530718;
+  for (int i = 0; i < 16; ++i) {
+    sum += readShadowOpticalDepthGround(uv + vogelDiskAP(i, 16, phi) * radius * texel, ci, distToTop);
+  }
+  return sum / 16.0;
+}
+
+vec3 correctBsmPosition(vec3 posMeters, float amount) {
+  if (amount <= 0.0) return posMeters;
+  vec3 sphereNormal = normalize(posMeters);
+  vec3 spherePosition = u_cloudShadowBottomRadius * sphereNormal;
+  return mix(posMeters, spherePosition, saturateAP(amount));
+}
+
+vec3 stabilizeBsmSamplePosition(vec3 posMeters, float viewDistMeters) {
+  float geoAmt = max(u_geometricErrorCorrectionAmount, 0.0);
+  float distAmt = smoothstep(8000.0, 50000.0, viewDistMeters);
+  float amount = saturateAP(max(geoAmt, distAmt));
+  vec3 corrected = correctBsmPosition(posMeters, amount);
+  if (amount < 0.01) return corrected;
+  vec3 n = normalize(corrected);
+  float h = length(posMeters) - u_cloudShadowBottomRadius;
+  float stableH = mix(h, max(h, 0.0) * (1.0 - 0.85 * amount), amount);
+  return n * (u_cloudShadowBottomRadius + stableH);
 }
 
 float getGroundSunTransmittance(vec3 rawWorldPosMeters) {
   if (u_cloudShadowEnabled == 0) return 1.0;
-  // 昼夜线遮挡 + 低太阳角阴影淡出(与 aerialPerspectiveEffect.frag 对齐)：避免日出/日落
-  // 云阴影被无限拉长。地面点位于 Bruneton bottom 球外侧、阴影射线朝太阳向外，故「地球曲面
-  // 遮挡直射阳光」由 horizonFade(昼夜线)承担；长阴影淡出由 lowSunFade/rayLenFade 承担。
-  vec3 groundNormal = normalize(rawWorldPosMeters);
+  vec3 camMeters = (u_cameraPosition + u_altitudeCorrection) / METER_TO_LENGTH_UNIT;
+  float viewDist = length(rawWorldPosMeters - camMeters);
+  vec3 samplePos = stabilizeBsmSamplePosition(rawWorldPosMeters, viewDist);
+
+  vec3 groundNormal = normalize(samplePos);
   float sunSinElev = dot(u_sunDirection, groundNormal);
   float horizonFade = smoothstep(-0.02, 0.02, sunSinElev);
   if (horizonFade <= 0.0) return 1.0;
 
-  float distToShadowTop = 0.0;
   float topShellR = u_cloudShadowBottomRadius + u_cloudShadowTopHeight;
   vec3 rd = u_sunDirection;
-  float bS = dot(rd, rawWorldPosMeters);
-  float cS = dot(rawWorldPosMeters, rawWorldPosMeters) - topShellR * topShellR;
+  float bS = dot(rd, samplePos);
+  float cS = dot(samplePos, samplePos) - topShellR * topShellR;
   float discS = bS * bS - cS;
   if (discS <= 0.0) return 1.0;
-  distToShadowTop = -bS + sqrt(discS);
+  float distToShadowTop = -bS + sqrt(discS);
   if (distToShadowTop <= 0.0) return 1.0;
 
   float lowSunFade = smoothstep(0.0, 0.087, sunSinElev);
@@ -179,36 +261,16 @@ float getGroundSunTransmittance(vec3 rawWorldPosMeters) {
   float fade = horizonFade * lowSunFade * rayLenFade;
   if (fade <= 0.0) return 1.0;
 
-  float scale = max(u_cloudShadowScale, 1e-6);
-  // cascade 边界做层间交叉淡出(阴影↔阴影)，只有最外层淡出到无阴影，避免每层边缘亮环(同心方块)。
-  for (int ci = 0; ci < 4; ci++) {
-    vec4 clip = u_cloudShadowMatrices[ci] * vec4(rawWorldPosMeters, 1.0);
-    clip /= clip.w;
-    vec2 uv = clip.xy * 0.5 + 0.5;
-    if (uv.x < 0.01 || uv.x > 0.99 || uv.y < 0.01 || uv.y > 0.99) continue;
-    float shadeCur = shadeFromCascade(ci, uv, distToShadowTop, scale);
-    float alpha = edgeFade01(uv);
-    if (alpha >= 0.999) {
-      return mix(1.0, shadeCur, fade);
-    }
-    float shade = shadeCur * alpha;
-    float wSum = alpha;
-    if (ci + 1 < 4) {
-      vec4 clipN = u_cloudShadowMatrices[ci + 1] * vec4(rawWorldPosMeters, 1.0);
-      clipN /= clipN.w;
-      vec2 uvN = clipN.xy * 0.5 + 0.5;
-      if (uvN.x >= 0.01 && uvN.x <= 0.99 && uvN.y >= 0.01 && uvN.y <= 0.99) {
-        float shadeNext = shadeFromCascade(ci + 1, uvN, distToShadowTop, scale);
-        float alphaN = edgeFade01(uvN);
-        float wN = (1.0 - alpha) * alphaN;
-        shade += shadeNext * wN;
-        wSum += wN;
-      }
-    }
-    shade += 1.0 * (1.0 - wSum);
-    return mix(1.0, shade, fade);
-  }
-  return 1.0;
+  float jitter = interleavedGradientNoiseAP(gl_FragCoord.xy);
+  float near = max(u_cloudShadowNear, 1e-3);
+  float far = max(u_cloudShadowFar, near + 1.0);
+  int ci = getFadedCascadeIndex(czm_view, samplePos, u_cloudShadowIntervals, near, far, jitter);
+  if (ci < 0) return 1.0;
+
+  float pcfRadius = mix(1.5, 3.0, saturateAP(viewDist / max(far, 1.0)));
+  float opticalDepth = sampleShadowOpticalDepthPCFGround(samplePos, distToShadowTop, pcfRadius, ci);
+  float shade = exp(-opticalDepth);
+  return mix(1.0, shade, fade);
 }
 
 float marchShadowLengthAtm(vec3 cameraKm, vec3 rd, float tNear, float tFar) {
@@ -495,6 +557,18 @@ export class AtmospherePostProcess {
     this._shadowLengthEnabled = true;
     this._shadowLengthTexture = null;
     this._shadowLengthScale = 1.0;
+    this._cloudShadowEnabled = false;
+    this._cloudShadowBuffer = null;
+    this._cloudShadowDecode = null;
+    this._cloudShadowNear = 0.1;
+    this._cloudShadowFar = 200000.0;
+    this._cloudShadowTopHeight = 5000.0;
+    this._cloudShadowBottomRadius = this.atmosphereParams.bottomRadius;
+    this._cloudShadowIntervals = null;
+    this._cloudShadowMatrices = null;
+    this._cloudShadowTexScale = 1.0;
+    this._cloudShadowTexelSize = null;
+    this._geometricErrorCorrectionAmount = 0.0;
     this._gui = null;
     // 当天空由 DrawCommand 版本的 SkyMaterial 绘制时，这里应关闭天空分支，只处理几何空中透视
     this._renderSky = options.renderSky ?? false;
@@ -702,6 +776,7 @@ export class AtmospherePostProcess {
       uniforms.u_cloudShadowDecode = () =>
         self._cloudShadowDecode ?? new Cesium.Cartesian4(1.0, 1.0, 1.0, 1.0);
       uniforms.u_cloudShadowBuffer = () => self._cloudShadowBuffer ?? self.textures.transmittanceTexture;
+      uniforms.u_cloudShadowNear = () => self._cloudShadowNear ?? 0.1;
       uniforms.u_cloudShadowFar = () => self._cloudShadowFar ?? 200000.0;
       uniforms.u_cloudShadowTopHeight = () => self._cloudShadowTopHeight ?? 5000.0;
       uniforms.u_cloudShadowBottomRadius = () =>
@@ -714,6 +789,10 @@ export class AtmospherePostProcess {
         Cesium.Matrix4.IDENTITY.clone(), Cesium.Matrix4.IDENTITY.clone(),
         Cesium.Matrix4.IDENTITY.clone(), Cesium.Matrix4.IDENTITY.clone()
       ];
+      uniforms.u_cloudShadowTexelSize = () =>
+        self._cloudShadowTexelSize ?? new Cesium.Cartesian2(1 / 512, 1 / 512);
+      uniforms.u_geometricErrorCorrectionAmount = () =>
+        self._geometricErrorCorrectionAmount ?? 0.0;
       uniforms.u_shadowLengthEnabled = () => (self._shadowLengthEnabled ? 1 : 0);
       uniforms.u_shadowLengthScale = () => (self._shadowLengthScale ?? 1.0);
       uniforms.u_shadowLengthBuffer = () => self._shadowLengthTexture ?? self.textures.transmittanceTexture;
@@ -783,11 +862,22 @@ export class AtmospherePostProcess {
       const d = options.decode;
       this._cloudShadowDecode = new Cesium.Cartesian4(d.x ?? 1.0, d.y ?? 1.0, d.z ?? 1.0, d.w ?? 1.0);
     }
+    this._cloudShadowNear = options.near ?? this._cloudShadowNear ?? 0.1;
     this._cloudShadowFar = options.far ?? 200000.0;
     this._cloudShadowTopHeight = options.topHeight ?? 5000.0;
     this._cloudShadowBottomRadius = options.bottomRadius ?? this.atmosphereParams.bottomRadius;
     this._cloudShadowIntervals = options.intervals ?? null;
     this._cloudShadowMatrices = options.matrices ?? null;
+    if (options.texelSize) {
+      const tx = options.texelSize;
+      this._cloudShadowTexelSize = new Cesium.Cartesian2(
+        tx.x ?? tx[0] ?? 1 / 512,
+        tx.y ?? tx[1] ?? 1 / 512,
+      );
+    }
+    if (options.geometricErrorCorrectionAmount !== undefined) {
+      this._geometricErrorCorrectionAmount = options.geometricErrorCorrectionAmount;
+    }
   }
 
   /**

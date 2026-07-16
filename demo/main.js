@@ -18,7 +18,7 @@ Cesium.Ion.defaultAccessToken =
 
 
 const viewer = new Cesium.Viewer("cesiumContainer", {
-  terrain: Cesium.Terrain.fromWorldTerrain(), // 全球地形
+  // terrain: Cesium.Terrain.fromWorldTerrain(), // 暂时不要地形了，不然远处的云在地形没加载完时会抖动，还没解决
   baseLayerPicker: false,
   geocoder: false,
   homeButton: false,

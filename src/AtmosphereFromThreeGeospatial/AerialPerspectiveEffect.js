@@ -56,6 +56,7 @@ export class AerialPerspectiveEffect {
     this._cloudShadowEnabled = false;
     this._cloudShadowBuffer = null;
     this._cloudShadowDecode = null;
+    this._cloudShadowNear = 0.1;
     this._cloudShadowFar = 200000.0;
     this._cloudShadowTopHeight = 5000.0;
     this._cloudShadowBottomRadius = this.atmosphereParams.bottomRadius;
@@ -65,6 +66,8 @@ export class AerialPerspectiveEffect {
     this._cloudShadowTexClamp01 = true;
     this._cloudShadowCesiumTexture = null;
     this._cloudShadowDummyArray = null;
+    this._cloudShadowTexelSize = null;
+    this._geometricErrorCorrectionAmount = 0.0;
 
     this._cloudShadowLengthEnabled = false;
     this._cloudShadowLengthTexture = null;
@@ -307,6 +310,7 @@ uniform sampler2D irradiance_texture;
         new Cesium.Cartesian4(1.0, 1.0, 1.0, 1.0);
       uniforms.u_cloudShadowBuffer = () =>
         self._cloudShadowBuffer ?? self.textures.transmittanceTexture;
+      uniforms.u_cloudShadowNear = () => self._cloudShadowNear ?? 0.1;
       uniforms.u_cloudShadowFar = () => self._cloudShadowFar ?? 200000.0;
       uniforms.u_cloudShadowTopHeight = () =>
         self._cloudShadowTopHeight ?? 5000.0;
@@ -328,6 +332,10 @@ uniform sampler2D irradiance_texture;
           Cesium.Matrix4.IDENTITY.clone(),
           Cesium.Matrix4.IDENTITY.clone(),
         ];
+      uniforms.u_cloudShadowTexelSize = () =>
+        self._cloudShadowTexelSize ?? new Cesium.Cartesian2(1 / 512, 1 / 512);
+      uniforms.u_geometricErrorCorrectionAmount = () =>
+        self._geometricErrorCorrectionAmount ?? 0.0;
 
       // shadowLength MRT 纹理（可选）
       uniforms.u_cloudShadowLengthEnabled = () =>
@@ -425,11 +433,21 @@ uniform sampler2D irradiance_texture;
         d.w ?? 1.0,
       );
     }
+    this._cloudShadowNear = options.near ?? this._cloudShadowNear ?? 0.1;
     this._cloudShadowFar = options.far ?? 200000.0;
     this._cloudShadowTopHeight = options.topHeight ?? 5000.0;
     this._cloudShadowBottomRadius = options.bottomRadius ?? this.atmosphereParams.bottomRadius;
     this._cloudShadowIntervals = options.intervals ?? null;
     this._cloudShadowMatrices = options.matrices ?? null;
+    if (options.texelSize) {
+      this._cloudShadowTexelSize = new Cesium.Cartesian2(
+        options.texelSize.x ?? options.texelSize[0] ?? 1 / 512,
+        options.texelSize.y ?? options.texelSize[1] ?? 1 / 512,
+      );
+    }
+    if (options.geometricErrorCorrectionAmount !== undefined) {
+      this._geometricErrorCorrectionAmount = options.geometricErrorCorrectionAmount;
+    }
   }
 
   /**

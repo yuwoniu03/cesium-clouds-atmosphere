@@ -417,8 +417,9 @@ float getDistanceToShadowTop(vec3 rayPos) {
   return -b + sqrt(h);
 }
 
+// three.js / CloudShadowPass intervals=(d-near)/(far-near) 一致
 float viewZToOrthographicDepth(float viewZ, float near, float far) {
-  return (-viewZ) / max(far, 1e-6);
+  return (viewZ + near) / (near - far);
 }
 
 int getFadedCascadeIndex(mat4 viewMat, vec3 worldPos, vec2 intervals[4], float near, float far, float jitter) {
@@ -820,8 +821,8 @@ export class ThreeGeospatialPipeline {
       temporalEnabled: false, temporalAlpha: 0.1,
       blueNoiseScale: 1.0, jitterStrength: 1.0,
       // BSM cascade 几何：shadowFar 控制覆盖最远距离，splitLambda 控制近处分配，fadeScale 扩大 ortho radius 防切割
-      // 经交互调试：shadowFar=20000(20km)、splitLambda=0.6(近处多分配)、fadeScale=1.5 可规避视角抬高时近处阴影切割
-      shadowFar: 20000, shadowSplitLambda: 0.6, shadowFadeScale: 1.5,
+      // fadeScale 提高以扩大 ortho 覆盖，避免 cascade 矩形外硬切；不再依赖 UV edgeFade
+      shadowFar: 40000, shadowSplitLambda: 1.0, shadowFadeScale: 5.0,
     };
 
     this.atmosphere = null;
@@ -1211,12 +1212,20 @@ uniform sampler2D irradiance_texture;
 
     const intervals = sp.getShadowIntervals();
     const mats = sp.getShadowMatrices();
+    const tile = sp.getTileSize?.() || Math.floor(SHADOW_MAP_SIZE / 2);
+    // 远距几何误差修正：相机越高/越远，越把 BSM 采样点拉向稳定球面（对齐 three-geospatial correctGeometricError）
+    const camH = this.viewer.camera.positionCartographic?.height ?? 0;
+    const geoAmt = Math.min(1, Math.max(0, (camH - 2000) / 25000));
     const opts = {
       enabled: true, texture: textureToPass, scale: scaleToPass,
-      decode: { x: 1, y: 1, z: 1, w: 1 }, far: sp.getShadowFar(),
+      decode: { x: 1, y: 1, z: 1, w: 1 },
+      near: sp.getShadowNear?.() ?? (Number(this.viewer.camera.frustum?.near) || 0.1),
+      far: sp.getShadowFar(),
       topHeight: this._getMaxHeight(), bottomRadius: Number(this.params.bottomRadius) || 6371000,
       intervals: intervals.map(a => new Cesium.Cartesian2(a[0], a[1])),
       matrices: mats.map(m => Cesium.Matrix4.fromArray(m)),
+      texelSize: { x: 1 / tile, y: 1 / tile },
+      geometricErrorCorrectionAmount: geoAmt,
     };
     this.atmosphere?.setCloudShadow?.(opts);
     this.aerial?.setCloudShadow?.(opts);
@@ -1436,7 +1445,8 @@ uniform sampler2D irradiance_texture;
       if (this.params.useShadowBuffer && this.textures) {
         this._bsm.pass = new CloudShadowPass(viewer, { textures: this.textures, params: this._getShadowPassParams() });
         this._bsm.pass.init();
-        this._bsm.resolve = new ShadowResolvePass(viewer, { size: SHADOW_MAP_SIZE, temporalAlpha: 0.1 });
+        // 静止 temporalAlpha 对齐 three-geospatial≈0.01；运动时 ShadowResolvePass 内会抬高 alpha
+        this._bsm.resolve = new ShadowResolvePass(viewer, { size: SHADOW_MAP_SIZE, temporalAlpha: 0.01 });
         this._bsm.resolve.setInputTextures(this._bsm.pass.getTexture(), this._bsm.pass.getDepthVelocityTexture());
         this._bsm.resolve.init();
       }
