@@ -831,22 +831,6 @@ export class AtmospherePostProcess {
     folder.add(this, '_atmosphereExposure', 0.0, 30.0, 0.01).name('手动曝光(关时间轴时)');
     folder.add(this.atmosphereParams, 'bottomRadius', 6300000, 6400000, 10).name('bottom_radius (m)');
     folder.add(this.atmosphereParams, 'topRadius', 6350000, 6500000, 10).name('top_radius (m)');
-    const debugFolder = this._gui.addFolder('丁达尔调试');
-    debugFolder.add(this, '_tyndallScale', 0.5, 6.0, 0.25).name('光柱强度 (scale)');
-    debugFolder.add(this, '_bsmTyndallOpticalDepthScale', 0.1, 50.0, 0.1).name('BSM OD 缩放(光柱)');
-    debugFolder.add(this, '_bsmGroundOpticalDepthScale', 0.1, 50.0, 0.1).name('BSM OD 缩放(地面)');
-    debugFolder.add(this, '_debugTyndallMode', {
-      '关闭': 0,
-      '1: shadowLength': 1,
-      '2: BSM启用(绿=是)': 2,
-      '3: BSM单点采样': 3,
-      '4: BSM纹理直显(B)': 4,
-      '5: transmittance诊断': 5,
-      '6: BSM纹理直显(R)': 6,
-      '7: BSM纹理直显(G)': 7,
-      '8: BSM纹理直显(A)': 8
-    }).name('调试模式');
-    debugFolder.open();
     folder.open();
   }
 
