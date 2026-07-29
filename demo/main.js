@@ -14,7 +14,7 @@ const Cesium = window.Cesium;
 
 //这里换上自己的 token ！！！！
 Cesium.Ion.defaultAccessToken =
-  ""; 
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI1NTE1YmU1ZS1lMWQ1LTQ1ZGEtYmVjZS1jNzlkYmRiYjI2YzgiLCJpZCI6ODQ5ODMsInN1YiI6ImhhdmVfbGlnaHQiLCJpc3MiOiJodHRwczovL2FwaS5jZXNpdW0uY29tIiwiYXVkIjoiaGF2ZV9saWdodF9kZWZhdWx0IiwiaWF0IjoxNzg0Mjk4NTQzfQ.2X7BKZfZJup0nd5dMMEuGbwhlopSqB4SPaN_NuEz6Jk"; 
 
 
 const viewer = new Cesium.Viewer("cesiumContainer", {

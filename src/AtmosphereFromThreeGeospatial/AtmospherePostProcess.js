@@ -301,13 +301,20 @@ float readShadowLengthBuffer(vec2 uv) {
 
 void reconstructRay(out vec3 ro, out vec3 rd) {
   ro = u_cameraPosition + u_altitudeCorrection;
-  vec2 uv = v_textureCoordinates * 2.0 - 1.0;
-  vec4 clipPos = vec4(uv, 1.0, 1.0);
-  vec4 viewPos = czm_inverseProjection * clipPos;
-  viewPos /= viewPos.w;
-  vec4 worldPos4 = czm_inverseView * viewPos;
-  vec3 worldPos = worldPos4.xyz * METER_TO_LENGTH_UNIT + u_altitudeCorrection;
-  rd = normalize(worldPos - ro);
+  // 用 Cesium window→eye 的近/远平面差分求视线，避免 clip z=1 + inverseProjection
+  // 在 log-depth / 多视锥 / 仰视净空时得到退化或错误方向（天顶 GetSkyRadiance≈0 → 整屏黑）。
+  vec4 eyeNear = czm_windowToEyeCoordinates(vec4(gl_FragCoord.xy, 0.0, 1.0));
+  vec4 eyeFar = czm_windowToEyeCoordinates(vec4(gl_FragCoord.xy, 1.0, 1.0));
+  if (abs(eyeNear.w) > 1e-10) eyeNear /= eyeNear.w;
+  if (abs(eyeFar.w) > 1e-10) eyeFar /= eyeFar.w;
+  vec3 dirEC = eyeFar.xyz - eyeNear.xyz;
+  float dirLen2 = dot(dirEC, dirEC);
+  if (dirLen2 < 1e-20) {
+    // 远近重合时退化为远点方向
+    dirEC = eyeFar.xyz;
+  }
+  // w=0 只变换方向到世界系（米制 ECEF），与 length unit 无关
+  rd = normalize((czm_inverseView * vec4(normalize(dirEC), 0.0)).xyz);
 }
 
 // 与 Shaders/aerialPerspectiveEffect.frag 一致：前向半直线与球的交点判定
@@ -362,7 +369,12 @@ void main() {
   float topRadius = ATMOSPHERE.top_radius;
   float camR = length(cameraPosition);
 
-  // —— 天空/地面：与 aerialPerspectiveEffect.frag 对齐（几何 + 放宽深度带），减轻天际线 log-depth 闪烁
+  // —— 天空/地面判定 ——
+  // Cesium 在「地平线出屏 / 无地形」时仍可能由 depth plane 写入假 depth：
+  // hasScene=true 但 color 仍是清屏黑。旧逻辑信任 hasScene → isSky=false →
+  // applyGroundAtmosphere=0 透传黑底 → 仰视整屏变黑。
+  // 主判据改用 Bruneton RayIntersectsGround（与 three-geospatial SkyMaterial 一致），
+  // depth 只用来识别「有真实着色的 Cesium 几何」。
   bool hitBottom = rayForwardHitsSphereAP(cameraPosition, rayDirection, bottomRadius);
   bool hitTop = rayForwardHitsSphereAP(cameraPosition, rayDirection, topRadius);
   bool inShell = cameraInAtmosphereShellAP(cameraPosition, bottomRadius, topRadius);
@@ -372,30 +384,42 @@ void main() {
   const float AP_DEPTH_SKY_EPS = 1e-4;
   bool hasSceneDepth = depth < 1.0 - AP_DEPTH_SKY_EPS;
 
-  // 宽带 0.014：与 log-depth 抖动折中。skyOverride 仅用于「真·净空 + 明显仰视」时压制误报的 hasScene，避免闪黑。
-  // 过宽的 depth（原 1-5e-4）+ 小 mu 会在仰视山坡/远山时把地形当净空 → 大气盖在地形前；过一会深度稳定后又恢复。
   const float MU_EXPLICIT_GROUND = -0.01;
-  const float SHELL_SKY_DEPTH_SLOP = 0.0005;
-  const float SKY_OVERRIDE_MU = 0.075;
-  const float SKY_OVERRIDE_DEPTH = 1.0 - 8e-6;
-  bool explicitGround = hitBottom || (hasSceneDepth && muLook < MU_EXPLICIT_GROUND);
+  const float SHELL_SKY_DEPTH_SLOP = 0.014;
+  const float SKY_OVERRIDE_MU = 0.05;
+  const float SKY_OVERRIDE_DEPTH = 1.0 - SHELL_SKY_DEPTH_SLOP;
+  // 清屏/假 depth 的原色接近黑；真实地形/模型通常有明显亮度
+  float sceneLum = dot(originalColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+  bool realScene = hasScene && sceneLum >= 0.06;
+
+  bool brunetonIntersectsGround = RayIntersectsGround(ATMOSPHERE, camR, muLook);
+  bool explicitGround = brunetonIntersectsGround || hitBottom || (hasSceneDepth && muLook < MU_EXPLICIT_GROUND);
   bool cameraOutsideAtmosphere = camR > topRadius + 1e-5;
-  bool forceGroundFromDepth = hasSceneDepth && cameraOutsideAtmosphere;
+  bool forceGroundFromDepth = realScene && cameraOutsideAtmosphere;
   bool passOriginalSpace = (muLook > 1e-5) && !hitTop;
 
   bool depthLikelySky = depth >= 1.0 - SHELL_SKY_DEPTH_SLOP;
   bool skyOverrideFromView =
     (muLook > SKY_OVERRIDE_MU) &&
     (depth >= SKY_OVERRIDE_DEPTH) &&
-    depthLikelySky &&
     !explicitGround;
 
   bool isSky = false;
-  if (inShell) {
-    if (hasScene && !skyOverrideFromView) {
+  if (u_applyGroundAtmosphere == 0) {
+    // 与 Aerial 分流：天空走 Bruneton；真几何原样留给 Aerial
+    // 朝天且缓冲仍接近清屏黑 → 无视假 depth，强制天空（地平线出屏场景）
+    if (!brunetonIntersectsGround && sceneLum < 0.06) {
+      isSky = true;
+    } else if (realScene) {
       isSky = false;
     } else {
-      isSky = depthLikelySky && !explicitGround;
+      isSky = !brunetonIntersectsGround;
+    }
+  } else if (inShell) {
+    if (realScene && !skyOverrideFromView) {
+      isSky = false;
+    } else {
+      isSky = (depthLikelySky || !brunetonIntersectsGround) && !explicitGround;
     }
   } else if (cameraOutsideAtmosphere) {
     if (forceGroundFromDepth) {
@@ -403,19 +427,10 @@ void main() {
     } else if (passOriginalSpace) {
       isSky = true;
     } else {
-      isSky = !hitBottom;
+      isSky = !brunetonIntersectsGround;
     }
   } else {
-    isSky = false;
-  }
-
-  // 天际线黑带：壳层内 applyGroundAtmosphere=0 时 isSky=false 会透传 originalColor；掠射带 hasScene/深度抖动使误判为几何，
-  // 而主缓冲该处常为未着色黑 → 一条黑带。仅在「宽带仍像天空 + 原色极暗 + 视线未朝脚下」时拉回天空，避免压暗色地形。
-  if (inShell && u_applyGroundAtmosphere == 0) {
-    float lum = dot(originalColor.rgb, vec3(0.2126, 0.7152, 0.0722));
-    if (!isSky && lum < 0.04 && depthLikelySky && !explicitGround && depth >= 1.0 - 0.01 && muLook > -0.14) {
-      isSky = true;
-    }
+    isSky = !brunetonIntersectsGround && muLook > SKY_OVERRIDE_MU;
   }
 
   // 地面分支仍依赖 depth 重建；若几何上已判地面但深度未重建出 hit，用 bottom 球前向交点兜底（同 aerial）
@@ -554,7 +569,10 @@ export class AtmospherePostProcess {
     this._tyndallScale = 2.5;
     this._bsmTyndallOpticalDepthScale = 1.0;
     this._bsmGroundOpticalDepthScale = 1.0;
-    this._shadowLengthEnabled = true;
+    // 必须为 false：未接入真实 shadowLengthBuffer 时若仍为 true，会回退采样
+    // transmittance LUT（屏幕 UV），把随机大值当 shadowLength。仰视 mu>0 时
+    // GetSkyRadiance 光柱分支会把散射压到接近 0 → 地平线出屏后整屏黑。
+    this._shadowLengthEnabled = false;
     this._shadowLengthTexture = null;
     this._shadowLengthScale = 1.0;
     this._cloudShadowEnabled = false;
@@ -793,9 +811,11 @@ export class AtmospherePostProcess {
         self._cloudShadowTexelSize ?? new Cesium.Cartesian2(1 / 512, 1 / 512);
       uniforms.u_geometricErrorCorrectionAmount = () =>
         self._geometricErrorCorrectionAmount ?? 0.0;
-      uniforms.u_shadowLengthEnabled = () => (self._shadowLengthEnabled ? 1 : 0);
+      uniforms.u_shadowLengthEnabled = () =>
+        (self._shadowLengthEnabled && self._shadowLengthTexture) ? 1 : 0;
       uniforms.u_shadowLengthScale = () => (self._shadowLengthScale ?? 1.0);
-      uniforms.u_shadowLengthBuffer = () => self._shadowLengthTexture ?? self.textures.transmittanceTexture;
+      uniforms.u_shadowLengthBuffer = () =>
+        self._shadowLengthTexture ?? self.textures.transmittanceTexture;
       uniforms.u_applyGroundAtmosphere = () => (self._applyGroundAtmosphere ? 1 : 0);
       uniforms.u_debugTyndall = () => (self._debugTyndallMode ?? 0);
       uniforms.u_tyndallScale = () => (self._tyndallScale ?? 1.0);

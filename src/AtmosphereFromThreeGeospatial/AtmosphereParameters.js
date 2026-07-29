@@ -173,7 +173,7 @@ export function AtmosphereParameters() {
   // 地球半径、大气顶半径 (m)
   //!!!!!!!!!!!!!!!!这里记住了，务必要用gui去调整bottomRadius，让他和cesium地球的半径真正相同
   //调整的部署设置为10米，妈的我就不信不能和ceisum地球半径一样大
-  this.bottomRadius = 6371030//6374000; //就他妈是这个高度，不改了，比6371910小就行了
+  this.bottomRadius = 6367720//6374000; //就他妈是这个高度，不改了，比6371910小就行了
   this.topRadius = 6420000;
   // 太阳角半径 (rad)
   this.sunAngularRadius = 0.004675;

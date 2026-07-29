@@ -52,13 +52,16 @@ vec4 tonemapDisplay(vec3 linearHdr, float a) {
 
 void reconstructRay(out vec3 ro, out vec3 rd) {
   ro = u_cameraPosition + u_altitudeCorrection;
-  vec2 uv = v_textureCoordinates * 2.0 - 1.0;
-  vec4 clipPos = vec4(uv, 1.0, 1.0);
-  vec4 viewPos = czm_inverseProjection * clipPos;
-  viewPos /= viewPos.w;
-  vec4 worldPos4 = czm_inverseView * viewPos;
-  vec3 worldPosKm = worldPos4.xyz * METER_TO_LENGTH_UNIT + u_altitudeCorrection;
-  rd = normalize(worldPosKm - ro);
+  // 近/远平面差分求视线，避免 clip z=1 在仰视净空时退化
+  vec4 eyeNear = czm_windowToEyeCoordinates(vec4(gl_FragCoord.xy, 0.0, 1.0));
+  vec4 eyeFar = czm_windowToEyeCoordinates(vec4(gl_FragCoord.xy, 1.0, 1.0));
+  if (abs(eyeNear.w) > 1e-10) eyeNear /= eyeNear.w;
+  if (abs(eyeFar.w) > 1e-10) eyeFar /= eyeFar.w;
+  vec3 dirEC = eyeFar.xyz - eyeNear.xyz;
+  if (dot(dirEC, dirEC) < 1e-20) {
+    dirEC = eyeFar.xyz;
+  }
+  rd = normalize((czm_inverseView * vec4(normalize(dirEC), 0.0)).xyz);
 }
 
 // 射线 o + t*d 与以原点为球心、半径 R 的球在 t>eps 上是否存在交点（前向半直线）
@@ -283,13 +286,21 @@ void main() {
     return;
   }
 
-  // 壳层内：与 AtmospherePostProcess 一致用 0.014 宽带，避免相机运动时深度抖动导致误走透视/透传、天际线闪黑。
+  // 壳层内：与 AtmospherePostProcess 一致。
+  // Cesium depth plane 在地平线出屏后写入假 depth；朝天像素禁止走地面透视。
   if (inShell && !forceAerialFromDepth) {
     const float SHELL_SKY_DEPTH_SLOP = 0.014;
     const float MU_EXPLICIT_GROUND = -0.065;
     bool depthLikelySky = depth >= 1.0 - SHELL_SKY_DEPTH_SLOP;
+    bool brunetonIntersectsGround = RayIntersectsGround(ATMOSPHERE, camRadius, muLook);
     bool explicitGround =
-      hitBottom || (hasSceneDepth && muLook < MU_EXPLICIT_GROUND);
+      brunetonIntersectsGround || hitBottom || (hasSceneDepth && muLook < MU_EXPLICIT_GROUND);
+    // 朝天（Bruneton 未交地）：透传 Atm 天空。mu 稍大时优先保天空，
+    // 代价是部分朝天山体缺少空中透视（仍保留地形本色）。
+    if (!brunetonIntersectsGround && (depthLikelySky || !hasSceneDepth || muLook > 0.08)) {
+      out_FragColor = tonemapDisplay(originalColor.rgb, originalColor.a);
+      return;
+    }
     if (depthLikelySky && !explicitGround) {
       out_FragColor = tonemapDisplay(originalColor.rgb, originalColor.a);
       return;

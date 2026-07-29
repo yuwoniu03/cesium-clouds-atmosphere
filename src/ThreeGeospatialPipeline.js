@@ -795,7 +795,7 @@ export class ThreeGeospatialPipeline {
 
     this.params = {
       cloudsVisible: true,
-      bottomRadius: 6371860,
+      bottomRadius: 6367720,
       layers: [
         { channel: 'r', altitude: 1800, height: 650, densityScale: 0.2, shapeAmount: 1.0, shapeDetailAmount: 1.0, weatherExponent: 1.0, shapeAlteringBias: 0.35, coverageFilterWidth: 0.6, coverage: 0.3, densityProfile: { expTerm: 0, exponent: 0, linearTerm: 0.75, constantTerm: 0.25 } },
         { channel: 'g', altitude: 2400, height: 1200, densityScale: 0.2, shapeAmount: 1.0, shapeDetailAmount: 1.0, weatherExponent: 1.0, shapeAlteringBias: 0.35, coverageFilterWidth: 0.6, coverage: 0.3, densityProfile: { expTerm: 0, exponent: 0, linearTerm: 0.75, constantTerm: 0.25 } },
