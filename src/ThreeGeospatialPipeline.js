@@ -171,13 +171,16 @@ vec2 raySphereIntersect(vec3 ro, vec3 rd, float radius) {
 
 void reconstructRay(out vec3 ro, out vec3 rd) {
   ro = u_cameraPosition + u_altitudeCorrection;
-  vec2 uv = v_textureCoordinates * 2.0 - 1.0;
-  vec4 clipPos = vec4(uv, 1.0, 1.0);
-  vec4 viewPos = czm_inverseProjection * clipPos;
-  viewPos /= viewPos.w;
-  vec4 worldPos4 = czm_inverseView * viewPos;
-  vec3 worldPos = worldPos4.xyz + u_altitudeCorrection;
-  rd = normalize(worldPos - ro);
+  // 与 Atmosphere 一致：近/远平面差分求视线，避免 clip z=1 在仰视净空时退化
+  vec4 eyeNear = czm_windowToEyeCoordinates(vec4(gl_FragCoord.xy, 0.0, 1.0));
+  vec4 eyeFar = czm_windowToEyeCoordinates(vec4(gl_FragCoord.xy, 1.0, 1.0));
+  if (abs(eyeNear.w) > 1e-10) eyeNear /= eyeNear.w;
+  if (abs(eyeFar.w) > 1e-10) eyeFar /= eyeFar.w;
+  vec3 dirEC = eyeFar.xyz - eyeNear.xyz;
+  if (dot(dirEC, dirEC) < 1e-20) {
+    dirEC = eyeFar.xyz;
+  }
+  rd = normalize((czm_inverseView * vec4(normalize(dirEC), 0.0)).xyz);
 }
 
 float getSTBN() {
@@ -643,6 +646,7 @@ void main() {
   // depthTestAgainstTerrain 只影响 Globe/贴地物体与地形网格的深度关系，不能替后处理修正「沿像素射线」的距离。
   // 此处必须用 inverseView 还原命中点，再沿 rd 求距离；用 -viewZ/dot(rd, forward) 在离轴像素上会偏大 → 云压在地形前。
   float rayDistToScene = 0.0;
+  float hitAltitude = -1.0e9;
   if (depth < 1.0 - 1e-7) {
     vec4 eyePos = czm_windowToEyeCoordinates(vec4(gl_FragCoord.xy, depth, 1.0));
     if (abs(eyePos.w) > 1e-6) {
@@ -651,6 +655,7 @@ void main() {
         vec4 worldPos4 = czm_inverseView * eyePos;
         vec3 worldHit = worldPos4.xyz + u_altitudeCorrection;
         rayDistToScene = max(0.0, dot(worldHit - ro, rd));
+        hitAltitude = length(worldHit) - u_bottomRadius;
       }
     }
   }
@@ -658,9 +663,18 @@ void main() {
   // 原逻辑：低于云层且 !ground 时跳过深度钳位 —— 平视/看山体时 ground 常为 false，会整屏不钳位 → 云盖住地形。
   // 仅当该像素无场景深度（天空）时才允许跳过；有地形/几何时必须用 rayDistToScene 截断射线。
   const float DEPTH_SKY = 1.0 - 1e-7;
+  float muLook = dot(normalize(ro), rd);
+  float sceneLum = dot(sceneColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+  // Cesium depth plane：地平线出屏后仍可能写入假 depth（命中点贴椭球、原色近黑）。
+  // 若用它钳位 tMax，会把云射线截在云层入口之前 → 仰视时云瞬间消失。
+  bool fakeDepthPlane =
+    !ground &&
+    muLook > 0.05 &&
+    rayDistToScene > 0.0 &&
+    (sceneLum < 0.08 || hitAltitude < max(u_minHeight * 0.25, 400.0));
   bool skipDepthClamp =
-    (depth >= DEPTH_SKY) && (u_cameraHeight < u_minHeight) && (!ground);
-  if (rayDistToScene > 0.0 && !skipDepthClamp) {
+    ((depth >= DEPTH_SKY) || fakeDepthPlane) && (u_cameraHeight < u_minHeight) && (!ground);
+  if (rayDistToScene > 0.0 && !skipDepthClamp && !fakeDepthPlane) {
     tMax = min(tMax, rayDistToScene);
     if (u_shadowLengthEnabled == 1 && shadowNF.y > 0.0) shadowNF.y = min(shadowNF.y, rayDistToScene);
     if (u_hazeEnabled == 1 && hazeNF.y > 0.0) hazeNF.y = min(hazeNF.y, rayDistToScene);
