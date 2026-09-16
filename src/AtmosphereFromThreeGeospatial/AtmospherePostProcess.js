@@ -396,8 +396,9 @@ void main() {
   const float SKY_OVERRIDE_DEPTH = 1.0 - SHELL_SKY_DEPTH_SLOP;
   // 清屏/假 depth 的原色接近黑；真实地形/模型通常有明显亮度
   float sceneLum = dot(originalColor.rgb, vec3(0.2126, 0.7152, 0.0722));
-  // 线性域阈值（原 0.06 为 sRGB 域；0.06^2.2 ≈ 0.002）
-  bool realScene = hasScene && sceneLum >= 0.002;
+  // 线性域「清屏黑」阈值（原 0.06 为 sRGB 域；0.06^2.2 ≈ 0.002）
+  const float AP_CLEAR_BLACK_LUM = 0.002;
+  bool realScene = hasScene && sceneLum >= AP_CLEAR_BLACK_LUM;
 
   bool brunetonIntersectsGround = RayIntersectsGround(ATMOSPHERE, camR, muLook);
   bool explicitGround = brunetonIntersectsGround || hitBottom || (hasSceneDepth && muLook < MU_EXPLICIT_GROUND);
@@ -414,8 +415,13 @@ void main() {
   bool isSky = false;
   if (u_applyGroundAtmosphere == 0) {
     // 与 Aerial 分流：天空走 Bruneton；真几何原样留给 Aerial
-    // 朝天且缓冲仍接近清屏黑 → 无视假 depth，强制天空（地平线出屏场景）
-    if (!brunetonIntersectsGround && sceneLum < 0.06) {
+    // 朝天且缓冲仍接近清屏黑 → 无视假 depth，强制天空（地平线出屏场景）。
+    // 阈值必须与 realScene 同源（线性域 ≈0.002）：此处遗留的 0.06 是 sRGB 域旧值，
+    // 会把「视线掠过几何地平线上方的远处地形」（brunetonIntersectsGround=false，
+    // 如 30km 高度看 600km 外高出切线的山体/高原）中亮度偏暗的像素整体判成天空，
+    // 天空辐射度直接替换地形 → 大气透过地形。云 stage 无条件用深度钳位 march 范围故不受影响。
+    // 假 depth 来自 Cesium DepthPlane（colorMask 全关、只写深度），颜色恒为清屏黑，0.002 足以区分。
+    if (!brunetonIntersectsGround && sceneLum < AP_CLEAR_BLACK_LUM) {
       isSky = true;
     } else if (realScene) {
       isSky = false;
