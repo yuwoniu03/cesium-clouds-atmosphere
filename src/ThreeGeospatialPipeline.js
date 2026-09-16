@@ -671,7 +671,8 @@ void main() {
     !ground &&
     muLook > 0.05 &&
     rayDistToScene > 0.0 &&
-    (sceneLum < 0.08 || hitAltitude < max(u_minHeight * 0.25, 400.0));
+    // 线性域阈值（原 0.08 为 sRGB 域；0.08^2.2 ≈ 0.004）
+    (sceneLum < 0.004 || hitAltitude < max(u_minHeight * 0.25, 400.0));
   bool skipDepthClamp =
     ((depth >= DEPTH_SKY) || fakeDepthPlane) && (u_cameraHeight < u_minHeight) && (!ground);
   if (rayDistToScene > 0.0 && !skipDepthClamp && !fakeDepthPlane) {
@@ -726,10 +727,9 @@ void main() {
   hitClouds = hitClouds && (cloudColor.a > max(u_edgeAlphaCutoff, 0.02));
 
   // 边缘稳噪：低 alpha 处直接除以 alpha 会把随机误差放大成亮点/闪点
+  // 合成保持线性 HDR 域，tonemap 统一由最末端 AgX stage 完成
   float edgeSafeAlpha = max(cloudColor.a, 0.08);
   vec3 cloudActual = cloudColor.rgb / edgeSafeAlpha;
-  cloudActual = ACESFilmic(cloudActual * u_cloudExposure);
-  cloudActual = pow(cloudActual, vec3(1.0 / 2.2));
 
   vec4 composited = vec4(
     sceneColor.rgb * (1.0 - cloudColor.a) + cloudActual * cloudColor.a,
@@ -1467,8 +1467,15 @@ uniform sampler2D irradiance_texture;
 
       // 5. Cloud PostProcessStage
       const uniforms = this._buildCloudUniforms();
+      const cloudCtx = viewer.scene.context;
+      const canCloudHalfFloat =
+        !!cloudCtx.halfFloatingPointTexture && !!cloudCtx.colorBufferHalfFloat;
       this.cloudStage = new Cesium.PostProcessStage({
         name: "GeospatialVolumetricClouds", fragmentShader, uniforms,
+        pixelFormat: Cesium.PixelFormat.RGBA,
+        pixelDatatype: canCloudHalfFloat
+          ? Cesium.PixelDatatype.HALF_FLOAT
+          : Cesium.PixelDatatype.UNSIGNED_BYTE,
       });
       this.cloudStage.enabled = this.params.cloudsVisible;
 

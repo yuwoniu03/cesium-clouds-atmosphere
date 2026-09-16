@@ -96,13 +96,17 @@ void main() {
   float haloVal = exp(-length(uv - sunUV) * 12.0) * 0.15 * sunVis * u_haloIntensity;
   vec3 halo = vec3(1.0, 0.98, 0.95) * haloVal;
 
-  vec3 bloomSample = texture(colorTexture, sunUV).rgb;
+  // 太阳盘 HDR 辐射度高达 60000，直接乘进 bloom 会全屏过曝。
+  // bloom 只是柔和光晕，把采样值钳到合理范围（对齐 three 的 LDR 量级）。
+  vec3 bloomSample = min(texture(colorTexture, sunUV).rgb, vec3(4.0));
   float bloomMask = exp(-length(uv - sunUV) * 15.0) * sunVis * u_bloomIntensity;
   vec3 bloomEffect = bloomSample * bloomMask;
 
-  // Screen blend: 1 - (1-base)*(1-effect), prevents over-saturation
+  // 线性 HDR 域用加法叠加（对齐 three LensFlareNode 的 add）。
+  // Screen blend 1-(1-a)*(1-b) 只在 LDR[0,1] 合法；HDR 下 a、b 都>1 时产出巨额负数 → 下游 AgX clamp 成纯黑（黑云 bug 根因）。
   vec3 totalEffect = flare + halo + bloomEffect;
-  color.rgb = 1.0 - (1.0 - color.rgb) * (1.0 - totalEffect);
+  color.rgb = color.rgb + totalEffect;
+  color.rgb = min(color.rgb, vec3(60000.0));  // 防 half float 溢出成 Inf → NaN
 
   out_FragColor = color;
 }
@@ -152,9 +156,16 @@ export class LensFlareBloomStage {
     const scene = this.viewer.scene;
     const self = this;
 
+    const canLensHalfFloat =
+      !!scene.context.halfFloatingPointTexture &&
+      !!scene.context.colorBufferHalfFloat;
     this.stage = new Cesium.PostProcessStage({
       name: 'LensFlareBloom',
       fragmentShader: LENS_FLARE_FRAGMENT,
+      pixelFormat: Cesium.PixelFormat.RGBA,
+      pixelDatatype: canLensHalfFloat
+        ? Cesium.PixelDatatype.HALF_FLOAT
+        : Cesium.PixelDatatype.UNSIGNED_BYTE,
       uniforms: {
         u_cameraPositionWC: () => self.viewer.camera.positionWC.clone(),
         u_sunDirectionWC: () =>

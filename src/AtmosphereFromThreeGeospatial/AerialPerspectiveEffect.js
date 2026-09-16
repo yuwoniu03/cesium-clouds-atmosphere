@@ -354,10 +354,16 @@ uniform sampler2D irradiance_texture;
       uniforms.u_bsmGroundOpticalDepthScale = () =>
         self._bsmGroundOpticalDepthScale ?? 1.0;
 
+      const canStageHalfFloat =
+        !!context.halfFloatingPointTexture && !!context.colorBufferHalfFloat;
       this.stage = new Cesium.PostProcessStage({
         name: "AerialPerspectiveEffect",
         fragmentShader: fragmentSource,
         uniforms,
+        pixelFormat: Cesium.PixelFormat.RGBA,
+        pixelDatatype: canStageHalfFloat
+          ? Cesium.PixelDatatype.HALF_FLOAT
+          : Cesium.PixelDatatype.UNSIGNED_BYTE,
       });
 
       if (self._autoAddStage !== false) {

@@ -61,4 +61,3 @@ vec3 getSkyRadiance(
 
   return radiance;
 }
-

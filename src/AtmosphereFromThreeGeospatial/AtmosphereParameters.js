@@ -172,7 +172,8 @@ export function AtmosphereParameters() {
   // ----- 来自 AtmosphereBrunetonProcess.js 的几何与物理量 -----
   // 地球半径、大气顶半径 (m)
   //!!!!!!!!!!!!!!!!这里记住了，务必要用gui去调整bottomRadius，让他和cesium地球的半径真正相同
-  //调整的部署设置为10米，妈的我就不信不能和ceisum地球半径一样大
+  //调整的步长设置为10米，妈的我就不信不能和ceisum地球半径一样大
+  //cesium是wgs84坐标系的，它的地球是椭球的，每个地方的半径都不一样  我这里的地球半径是个经验值，按照你的位置进行调整半径吧~
   this.bottomRadius = 6367720//6374000; //就他妈是这个高度，不改了，比6371910小就行了
   this.topRadius = 6420000;
   // 太阳角半径 (rad)

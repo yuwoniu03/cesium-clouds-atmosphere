@@ -341,6 +341,9 @@ bool cameraInAtmosphereShellAP(vec3 o, float bottomR, float topR) {
 
 void main() {
   vec4 originalColor = texture(colorTexture, v_textureCoordinates);
+  // Cesium LDR 场景图是 sRGB 编码；链首转回线性，让整条后续管线在线性 HDR 域运算
+  // （对齐 three-geospatial：renderer 全程 linear working color space）
+  originalColor.rgb = pow(max(originalColor.rgb, vec3(0.0)), vec3(2.2));
   float depth = czm_readDepth(depthTexture, v_textureCoordinates);
 
   vec3 cameraPosition = u_cameraPosition;
@@ -393,7 +396,8 @@ void main() {
   const float SKY_OVERRIDE_DEPTH = 1.0 - SHELL_SKY_DEPTH_SLOP;
   // 清屏/假 depth 的原色接近黑；真实地形/模型通常有明显亮度
   float sceneLum = dot(originalColor.rgb, vec3(0.2126, 0.7152, 0.0722));
-  bool realScene = hasScene && sceneLum >= 0.06;
+  // 线性域阈值（原 0.06 为 sRGB 域；0.06^2.2 ≈ 0.002）
+  bool realScene = hasScene && sceneLum >= 0.002;
 
   bool brunetonIntersectsGround = RayIntersectsGround(ATMOSPHERE, camR, muLook);
   bool explicitGround = brunetonIntersectsGround || hitBottom || (hasSceneDepth && muLook < MU_EXPLICIT_GROUND);
@@ -520,8 +524,12 @@ void main() {
     finalColor = originalColor.rgb * transmittance * sunTransmittance + inscatter;
   }
 
-  // 线性 HDR + 单次曝光；ACES/gamma 仅在后接 AerialPerspectiveEffect 中做，避免两道 ACES 叠乘过曝
-  out_FragColor = vec4(finalColor * u_atmosphereExposure, originalColor.a);
+  // 输出裸线性辐射度（three 原版语义）；曝光/tonemap 统一由管线最末端的 AgX stage 完成。
+  // 太阳盘 radiance ~1e9 远超 HALF_FLOAT 上限(65504)：写入中间纹理会变 Inf，
+  // 下游 LensFlare blur / 云 TAA 历史相减把 Inf 变 NaN → 太阳中心黑斑、halo 白圆内云边缘发黑。
+  // 钳到安全值：天空正常 radiance 远低于此，太阳盘经 AgX 后仍是纯白圆盘，无视觉损失。
+  finalColor = min(finalColor, vec3(60000.0));
+  out_FragColor = vec4(finalColor, originalColor.a);
 }
 `;
 

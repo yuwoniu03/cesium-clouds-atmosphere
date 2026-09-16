@@ -34,20 +34,11 @@ const float METER_TO_LENGTH_UNIT = 0.001; // m -> km
 
 float saturateAP(float x) { return clamp(x, 0.0, 1.0); }
 
-vec3 ACESFilmic(vec3 x) {
-  float a = 2.51;
-  float b = 0.03;
-  float c = 2.43;
-  float d = 0.59;
-  float e = 0.14;
-  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-}
-
-// AtmospherePostProcess 已输出曝光后的线性 HDR；本 pass 只做一次 OETF（勿再乘曝光）
+// 线性 HDR 透传：整条管线保持线性 HDR 语义，
+// tonemap 统一由管线最末端的 AgX stage 完成（对齐 three 原版 AerialPerspectiveEffect）。
+// 12 处调用点（cosmetic / ground / 主输出）均无需改动。
 vec4 tonemapDisplay(vec3 linearHdr, float a) {
-  vec3 c = ACESFilmic(linearHdr);
-  c = pow(c, vec3(1.0 / 2.2));
-  return vec4(c, a);
+  return vec4(linearHdr, a);
 }
 
 void reconstructRay(out vec3 ro, out vec3 rd) {
