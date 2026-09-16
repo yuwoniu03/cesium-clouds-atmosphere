@@ -830,7 +830,9 @@ export class ThreeGeospatialPipeline {
       scatterG1: 0.7, scatterG2: -0.2, scatterMix: 0.5,
       sunIntensity: 20.0, skyLightScale: 1.0, skyToSunRatio: 0.28,
       powderScale: 0.8, powderExponent: 150.0,
-      aerialPerspectiveScale: 1.3, cloudExposure: 3.0, magentaFixStrength: 2.0, edgeAlphaCutoff: 0.0, mipLevelScale: 0.35,
+      // magentaFixStrength 默认关：原系数(×5×strength)是按 LDR[0,1] 量纲设计，HDR 线性域下几乎饱和到 fix=1，
+      // 把云的 r/b 通道全力压向 g（拉灰绿），误伤物理正确的落日暖色。three-geospatial 无此 hack，先默认关对齐。
+      aerialPerspectiveScale: 1.3, cloudExposure: 3.0, magentaFixStrength: 0.0, edgeAlphaCutoff: 0.0, mipLevelScale: 0.35,
       windSpeed: 0.0, evolutionSpeed: 0.005,
       temporalEnabled: false, temporalAlpha: 0.1,
       blueNoiseScale: 1.0, jitterStrength: 1.0,
@@ -1091,7 +1093,7 @@ uniform sampler2D irradiance_texture;
       u_sunIntensity: () => p().sunIntensity, u_skyToSunRatio: () => p().skyToSunRatio,
       u_powderScale: () => p().powderScale, u_powderExponent: () => p().powderExponent,
       u_aerialPerspectiveScale: () => p().aerialPerspectiveScale, u_cloudExposure: () => p().cloudExposure,
-      u_magentaFixStrength: () => p().magentaFixStrength ?? 0.8,
+      u_magentaFixStrength: () => p().magentaFixStrength ?? 0.0,
       u_edgeAlphaCutoff: () => p().edgeAlphaCutoff ?? 0.03,
       u_resolution: () => { const ctx = self.viewer.scene.context; return new Cesium.Cartesian2(ctx.drawingBufferWidth || 1, ctx.drawingBufferHeight || 1); },
       u_mipLevelScale: () => Number(p().mipLevelScale) || 1.0,
@@ -1144,7 +1146,16 @@ uniform sampler2D irradiance_texture;
     if (!gl) return null;
     const tex = this._taa.current === 0 ? this._taa.texA : this._taa.texB;
     if (!tex) return null;
-    return { _texture: tex, _textureTarget: gl.TEXTURE_2D, _target: gl.TEXTURE_2D };
+    return {
+      _texture: tex,
+      _textureTarget: gl.TEXTURE_2D,
+      _target: gl.TEXTURE_2D,
+      // Cesium 采样自定义纹理 uniform 必须调用此方法把纹理挂载到 GPU（同 _bsmResolveGetTexture）
+      bind: function (textureUnit) {
+        gl.activeTexture(gl.TEXTURE0 + textureUnit);
+        gl.bindTexture(gl.TEXTURE_2D, this._texture);
+      }
+    };
   }
 
   // ── BSM blit to Cesium.Texture ─────────────────────────────────────────
@@ -1247,43 +1258,72 @@ uniform sampler2D irradiance_texture;
 
   // ── TAA (inline CloudsResolvePass) ─────────────────────────────────────
 
+  // 从云 stage 的当帧输出纹理（线性 HDR：rgb=合成后颜色 / a=云覆盖度）拷贝进 history。
+  // 旧实现用 readPixels 抓 post-AgX 的 8bit canvas：sRGB 编码 + 被 LensFlare 污染 + alpha 被 AgX 覆写，
+  // 与 shader 里的线性 HDR sceneColor 完全不在一个域，导致 deltaHist/reject 全错，history 名存实亡。
+  // 现改为：postRender 时直接取 cloudStage.outputTexture（HALF_FLOAT 线性 HDR），blit 进自管 RGBA16F 纹理。
   _taaCapture() {
     const gl = this.viewer.scene.context?._gl;
     if (!gl) return;
-    const canvas = this.viewer.scene.canvas;
-    const w = canvas.width, h = canvas.height;
+    const out = this.cloudStage?.outputTexture;
+    const srcTex = out?._texture;
+    if (!srcTex) return;
+    const w = out.width, h = out.height;
+
+    // 尺寸变化 → 重建 RGBA16F ping-pong history 纹理（保真线性 HDR + alpha）
     if (w !== this._taa.w || h !== this._taa.h) {
       if (this._taa.texA) gl.deleteTexture(this._taa.texA);
       if (this._taa.texB) gl.deleteTexture(this._taa.texB);
-      if (this._taa.pbo) gl.deleteBuffer(this._taa.pbo);
-      const mkTex = () => { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); gl.bindTexture(gl.TEXTURE_2D, null); return t; };
+      const mkTex = () => {
+        const t = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        return t;
+      };
       this._taa.texA = mkTex(); this._taa.texB = mkTex();
-      this._taa.pbo = gl.createBuffer(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this._taa.pbo); gl.bufferData(gl.PIXEL_PACK_BUFFER, w * h * 4, gl.STREAM_READ); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
-      this._taa.w = w; this._taa.h = h; this._taa.frameCount = 0; this._taa.pboReady = false;
+      this._taa.w = w; this._taa.h = h; this._taa.frameCount = 0;
     }
+
+    // blit program 懒初始化（全屏三角形透传）
+    if (!this._taa.blitProg) {
+      this._taa.blitProg = createGLProgram(gl,
+        `#version 300 es\nin vec2 a_pos;\nout vec2 v_uv;\nvoid main(){v_uv=a_pos*0.5+0.5;gl_Position=vec4(a_pos,0,1);}`,
+        `#version 300 es\nprecision highp float;\nuniform sampler2D u_src;\nin vec2 v_uv;\nout vec4 o;\nvoid main(){o=texture(u_src,v_uv);}`,
+        "TAABlit");
+      const vbo = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      this._taa.blitVbo = vbo;
+      this._taa.blitFbo = gl.createFramebuffer();
+    }
+
+    // 写入「非当前读取」的那个纹理（ping-pong），供下一帧采样
     const writeTex = this._taa.current === 0 ? this._taa.texB : this._taa.texA;
-    if (this._taa.pboReady) {
-      const prevTex = gl.getParameter(gl.TEXTURE_BINDING_2D);
-      const flipY = gl.getParameter(gl.UNPACK_FLIP_Y_WEBGL), premul = gl.getParameter(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL);
-      if (flipY) gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-      if (premul) gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-      gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, this._taa.pbo);
-      gl.bindTexture(gl.TEXTURE_2D, writeTex);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, 0);
-      gl.bindTexture(gl.TEXTURE_2D, prevTex);
-      gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
-      if (flipY) gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-      if (premul) gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
-      this._taa.current = 1 - this._taa.current;
-      this._taa.frameCount++;
+    const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING), prevVp = gl.getParameter(gl.VIEWPORT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._taa.blitFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, writeTex, 0);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo); gl.viewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]); return;
     }
-    const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this._taa.pbo);
-    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, 0);
-    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
-    if (prevFbo) gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo);
-    this._taa.pboReady = true;
+    gl.viewport(0, 0, w, h);
+    gl.useProgram(this._taa.blitProg);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, srcTex);
+    gl.uniform1i(gl.getUniformLocation(this._taa.blitProg, "u_src"), 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._taa.blitVbo);
+    const aloc = gl.getAttribLocation(this._taa.blitProg, "a_pos");
+    if (aloc >= 0) { gl.enableVertexAttribArray(aloc); gl.vertexAttribPointer(aloc, 2, gl.FLOAT, false, 0, 0); }
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    if (aloc >= 0) gl.disableVertexAttribArray(aloc);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo);
+    gl.viewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
+
+    this._taa.current = 1 - this._taa.current;
+    this._taa.frameCount++;
   }
 
   _taaUpdateVP() {
